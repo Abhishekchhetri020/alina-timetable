@@ -59,6 +59,16 @@ pub struct Placement {
     pub start: TimeSlot,
     pub room: Option<RoomId>,
 }
+/// Optional hard limits. Absence means unrestricted.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct HardLimits {
+    pub teacher_periods_per_day: BTreeMap<TeacherId, u8>,
+    pub class_periods_per_day: BTreeMap<ClassId, u8>,
+    pub subject_periods_per_day: BTreeMap<SubjectId, u8>,
+    /// Bit per allowed day. Missing entries permit every day.
+    pub lesson_allowed_days: BTreeMap<LessonId, u64>,
+    pub lesson_fixed_start: BTreeMap<LessonId, TimeSlot>,
+}
 /// Bootstrap schema, not yet a stable interchange format.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimetableDoc {
@@ -72,6 +82,8 @@ pub struct TimetableDoc {
     pub lessons: BTreeMap<LessonId, Lesson>,
     pub placements: Arc<BTreeMap<CardId, Placement>>,
     pub locked_slots: BTreeSet<TimeSlot>,
+    #[serde(default)]
+    pub hard_limits: HardLimits,
 }
 impl Default for TimetableDoc {
     fn default() -> Self {
@@ -86,6 +98,7 @@ impl Default for TimetableDoc {
             lessons: BTreeMap::new(),
             placements: Arc::new(BTreeMap::new()),
             locked_slots: BTreeSet::new(),
+            hard_limits: HardLimits::default(),
         }
     }
 }

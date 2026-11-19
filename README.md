@@ -1,6 +1,6 @@
 # Alina
 
-Alina is an open-source, local-first school timetabling project, inspired by Chronexa and intended to run as a native Rust application and in browsers using WebAssembly. This repository is an **architecture bootstrap**: it does not yet generate timetables, run a GUI, or expose a CLI/MCP service. A preliminary oracle checks a limited subset of constraints; it is not a complete verifier. Do not use it for school scheduling yet.
+Alina is an open-source, local-first school timetabling project, inspired by Chronexa and intended to run as a native Rust application and in browsers using WebAssembly. This repository is an **architecture bootstrap**: it contains an experimental reference solver and a partial constraint oracle, but does not yet run a GUI or expose a CLI/MCP service. Neither solver nor oracle covers the full Chronexa constraint set. Do not use it for school scheduling yet.
 
 ## Workspace
 
