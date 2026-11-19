@@ -1,7 +1,7 @@
 #![deny(clippy::unwrap_used)]
 //! Explicit, conservative adapter for a subset of Chronexa's school JSON.
 //! Unsupported rule-bearing data is rejected rather than silently discarded.
-use alina_doc::{Class, Lesson, Room, Subject, Teacher, TimetableDoc};
+use alina_doc::{Class, ClassScope, Lesson, Room, Subject, Teacher, TimetableDoc};
 use alina_foundation::{
     Availability, CardId, ClassId, LessonId, RoomId, SubjectId, TeacherId, TimeSlot,
 };
@@ -230,11 +230,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         ],
         "school",
     )?;
-    reject_fields(
-        &root,
-        &["relations", "groups", "divisions", "globals"],
-        "school",
-    )?;
+    reject_fields(&root, &["relations", "divisions", "globals"], "school")?;
     let days =
         u8::try_from(number(&root, "daysPerWeek", 5)?).map_err(|_| err("invalid daysPerWeek"))?;
     let periods = u8::try_from(number(&root, "periodsPerDay", 8)?)
@@ -253,6 +249,49 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
     let ri = ids(rooms, "room")?;
     let si = ids(subjects, "subject")?;
     let li = ids(lessons, "lesson")?;
+    // Assign stable group IDs independent of input order. Division tags are local
+    // to each class, and groups from different divisions may share students.
+    let group_entries = match root.get("groups") {
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(entries)) => entries.as_slice(),
+        _ => return Err(err("groups must be an array")),
+    };
+    let group_ids = ids(group_entries, "group")?;
+    let mut groups = BTreeMap::new();
+    for group in group_entries {
+        allowed_fields(
+            group,
+            &[
+                "id",
+                "name",
+                "classId",
+                "entireClass",
+                "divisionTag",
+                "studentCount",
+                "studentIds",
+            ],
+            "group",
+        )?;
+        reject_fields(group, &["studentCount", "studentIds"], "group")?;
+        let source = string(group, "id")?;
+        let class = string(group, "classId")?;
+        let class = ClassId(
+            *ci.get(class)
+                .ok_or_else(|| err(format!("unknown group class {class}")))?,
+        );
+        let division = u32::try_from(number(group, "divisionTag", 0)?)
+            .map_err(|_| err("invalid divisionTag"))?;
+        if division >= 65535 {
+            return Err(err("divisionTag must be below 65535"));
+        }
+        let entire = match group.get("entireClass") {
+            None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+            Some(Value::Bool(true)) => true,
+            _ => return Err(err("invalid group entireClass")),
+        };
+        let id = u32::try_from(group_ids[source]).map_err(|_| err("too many groups"))?;
+        groups.insert(id, (class, division, entire));
+    }
     let mut doc = TimetableDoc {
         days,
         periods_per_day: periods,
@@ -559,11 +598,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             ],
             "lesson",
         )?;
-        reject_fields(
-            l,
-            &["constraints", "groupIds", "conditional", "isOptional"],
-            "lesson",
-        )?;
+        reject_fields(l, &["constraints", "conditional", "isOptional"], "lesson")?;
         let source = string(l, "id")?;
         let subject = string(l, "subjectId")?;
         let subject = SubjectId(
@@ -600,10 +635,43 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
                 }
             }
         }
-        let class_ids = references(l, "classIds", &ci)?
+        let class_ids: Vec<ClassId> = references(l, "classIds", &ci)?
             .into_iter()
             .map(ClassId)
             .collect();
+        let mut class_scopes: BTreeMap<ClassId, ClassScope> = BTreeMap::new();
+        for id in references(l, "groupIds", &group_ids)? {
+            let id = u32::try_from(id).map_err(|_| err("invalid group ID"))?;
+            let &(class, division, entire) = groups.get(&id).ok_or_else(|| err("unknown group"))?;
+            if !class_ids.contains(&class) {
+                return Err(err(format!(
+                    "lesson {source} references a group outside its classes"
+                )));
+            }
+            if entire {
+                class_scopes.insert(class, ClassScope::Whole);
+                continue;
+            }
+            match class_scopes
+                .entry(class)
+                .or_insert_with(|| ClassScope::Groups {
+                    division,
+                    groups: BTreeSet::new(),
+                }) {
+                ClassScope::Whole => {}
+                ClassScope::Groups {
+                    division: current,
+                    groups,
+                } if *current == division => {
+                    groups.insert(id);
+                }
+                ClassScope::Groups { .. } => {
+                    return Err(err(format!(
+                        "lesson {source} combines groups from different divisions"
+                    )))
+                }
+            }
+        }
         let teacher_ids = references(l, "teacherIds", &ti)?
             .into_iter()
             .map(TeacherId)
@@ -640,7 +708,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
                 subject,
                 teachers: teacher_ids,
                 classes: class_ids,
-                class_scopes: BTreeMap::new(),
+                class_scopes,
                 student_count: None,
                 duration,
                 occurrences,
@@ -714,6 +782,51 @@ mod tests {
           "classrooms": [{"id":"r", "name":"R", "capacity":25}],
           "subjects": [{"id":"s", "name":"S"}],
           "lessons": [{"id":"l", "subjectId":"s", "teacherIds":["t"], "classIds":["c"], "periodsPerWeek":4, "periodsPerCard":2, "preferredRoomId":"r"}]})
+    }
+    #[test]
+    fn imports_split_groups_and_verifies_parallel_lessons() -> Result<(), ImportError> {
+        use alina_doc::Placement;
+        use alina_oracle::{verify, Violation};
+        use std::sync::Arc;
+        let mut v = input();
+        v["groups"] = json!([
+            {"id":"a", "name":"A", "classId":"c", "divisionTag":1},
+            {"id":"b", "name":"B", "classId":"c", "divisionTag":1},
+            {"id":"other", "name":"Other", "classId":"c", "divisionTag":2},
+            {"id":"whole", "classId":"c", "entireClass":true}
+        ]);
+        v["lessons"] = json!([
+            {"id":"l1", "subjectId":"s", "classIds":["c"], "groupIds":["a"], "periodsPerWeek":1},
+            {"id":"l2", "subjectId":"s", "classIds":["c"], "groupIds":["b"], "periodsPerWeek":1}
+        ]);
+        let check = |v: &Value| -> Result<bool, ImportError> {
+            let mut doc = import_chronexa_json(&v.to_string())?.document;
+            for id in 1..=2 {
+                Arc::make_mut(&mut doc.placements).insert(
+                    CardId(id),
+                    Placement {
+                        card: CardId(id),
+                        lesson: LessonId(id),
+                        start: TimeSlot { day: 0, period: 0 },
+                        room: None,
+                    },
+                );
+            }
+            Ok(verify(&doc)
+                .violations
+                .iter()
+                .any(|x| matches!(x, Violation::ClassClash { .. })))
+        };
+        assert!(!check(&v)?);
+        v["lessons"][1]["groupIds"] = json!(["a"]);
+        assert!(check(&v)?);
+        v["lessons"][1]["groupIds"] = json!(["other"]);
+        assert!(check(&v)?);
+        v["lessons"][1]["groupIds"] = json!(["whole"]);
+        assert!(check(&v)?);
+        v["lessons"][1]["groupIds"] = json!(["missing"]);
+        assert!(import_chronexa_json(&v.to_string()).is_err());
+        Ok(())
     }
     #[test]
     fn expands_double_lessons_and_room_choices() -> Result<(), ImportError> {

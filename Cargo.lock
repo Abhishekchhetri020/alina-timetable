@@ -23,6 +23,7 @@ version = "0.1.0"
 dependencies = [
  "alina-doc",
  "alina-foundation",
+ "alina-oracle",
  "serde_json",
 ]
 
