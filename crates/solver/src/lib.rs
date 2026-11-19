@@ -15,7 +15,10 @@ pub struct CardRequest {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
+    /// All requested cards were placed and every lesson occurrence is present.
     Complete,
+    /// All requested cards were placed, but the input omitted requirements.
+    RequestComplete,
     Exhausted,
     BudgetReached,
 }
@@ -33,6 +36,8 @@ pub enum SolveError {
     MissingLesson(LessonId),
     OccurrenceOverflow(LessonId),
     UnknownRelationCard(CardId),
+    /// Final independent verification detected an internal solver error.
+    InvalidResult,
     InvalidBudget,
 }
 
@@ -96,6 +101,14 @@ pub fn solve(
     };
     let complete = ctx.search(&ordered.iter().map(|r| r.card).collect::<Vec<_>>());
     let chosen = ctx.best;
+    let mut final_doc = base.clone();
+    for placement in &chosen {
+        Arc::make_mut(&mut final_doc.placements).insert(placement.card, placement.clone());
+    }
+    let report = alina_oracle::verify(&final_doc);
+    if !report.violations.is_empty() {
+        return Err(SolveError::InvalidResult);
+    }
     let assigned: BTreeSet<_> = chosen.iter().map(|p| p.card).collect();
     let unplaced = ordered
         .iter()
@@ -103,8 +116,10 @@ pub fn solve(
         .map(|r| r.card)
         .collect();
     Ok(SolveResult {
-        status: if complete {
+        status: if complete && report.unplaced == 0 {
             Status::Complete
+        } else if complete {
+            Status::RequestComplete
         } else if ctx.limited {
             Status::BudgetReached
         } else {
@@ -327,7 +342,7 @@ mod tests {
             .collect();
         let a = solve(&d, &req, 100)?;
         let b = solve(&d, &req, 100)?;
-        assert_eq!(a.status, Status::Complete);
+        assert_eq!(a.status, Status::RequestComplete);
         assert_eq!(format!("{:?}", a.placements), format!("{:?}", b.placements));
         let mut result = d;
         for p in a.placements {
@@ -360,6 +375,23 @@ mod tests {
             rooms: vec![],
         }];
         assert_eq!(solve(&d, &req, 1)?.status, Status::BudgetReached);
+        Ok(())
+    }
+    #[test]
+    fn complete_requires_all_lesson_occurrences() -> Result<(), SolveError> {
+        let mut d = fixture();
+        if let Some(lesson) = d.lessons.get_mut(&LessonId(1)) {
+            lesson.occurrences = 2;
+        }
+        let req: Vec<_> = (1..=2)
+            .map(|n| CardRequest {
+                card: CardId(n),
+                lesson: LessonId(1),
+                rooms: vec![],
+            })
+            .collect();
+        assert_eq!(solve(&d, &req, 100)?.status, Status::Complete);
+        assert_eq!(solve(&d, &req[..1], 100)?.status, Status::RequestComplete);
         Ok(())
     }
     #[test]
