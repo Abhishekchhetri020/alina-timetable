@@ -906,6 +906,19 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             }
             matching.push((request.card, l.subject));
         }
+        if typ == "n_0"
+            && matching.iter().any(|(card, _)| {
+                requests
+                    .iter()
+                    .find(|r| r.card == *card)
+                    .and_then(|r| doc.lessons.get(&r.lesson))
+                    .is_some_and(|l| l.duration > 1)
+            })
+        {
+            return Err(err(
+                "n_0 with multi-period lessons has order-dependent Chronexa behavior",
+            ));
+        }
         if typ == "n_9" {
             for &(a, subject_a) in &matching {
                 if !leaders.contains(&subject_a) {
@@ -954,6 +967,15 @@ mod tests {
           "classrooms": [{"id":"r", "name":"R", "capacity":25}],
           "subjects": [{"id":"s", "name":"S"}],
           "lessons": [{"id":"l", "subjectId":"s", "teacherIds":["t"], "classIds":["c"], "periodsPerWeek":4, "periodsPerCard":2, "preferredRoomId":"r"}]})
+    }
+    #[test]
+    fn rejects_order_dependent_multi_period_cannot_follow_relation() -> Result<(), ImportError> {
+        let mut v = input();
+        v["relations"] = json!([{ "typ":"n_0", "subjectids":["s"] }]);
+        assert!(import_chronexa_json(&v.to_string()).is_err());
+        v["lessons"][0]["periodsPerCard"] = json!(1);
+        assert!(import_chronexa_json(&v.to_string()).is_ok());
+        Ok(())
     }
     #[test]
     fn ordered_subject_relation_respects_direction_span_and_legacy_format(
