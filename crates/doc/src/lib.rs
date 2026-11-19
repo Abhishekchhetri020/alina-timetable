@@ -76,6 +76,10 @@ pub enum CardRelationKind {
     SameStart,
     /// On the same day, both starts must use the same period.
     SamePeriodWhenSameDay,
+    /// The cards start in consecutive periods on the same day.
+    AdjacentStarts,
+    /// Card b starts one period after card a on the same day.
+    OrderedAdjacentStarts,
     /// Either card immediately follows the other, accounting for duration.
     Adjacent,
     /// Card a immediately precedes card b.

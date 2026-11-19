@@ -22,7 +22,7 @@ The oracle supports conservative split-group conflict checks and subject paralle
 
 The reference Rust solver is deliberately bounded and validates candidates through the oracle. It is not optimized for school scale, does not implement Chronexa parity, and cannot yet model all required constraints.
 
-The command session supports atomic place, unplace, swap, slot locking and snapshot undo/redo. Commands validate the resulting document with the oracle; command replay persistence, richer editing commands and collaborative synchronization remain unimplemented. The importer expands a subset of Chronexa scoped relations (n_0, n_1, n_2, n_7, n_8, n_9, n_10, n_12 and n_13) to card pairs. For n_12/n_13, periods must match only when both cards are on the same day, matching Chronexa’s solver. Other scoped relations remain unsupported. The importer rejects n_0 when matched lessons span multiple periods: direct Chronexa solver checks show order-dependent behavior for doubles, so a deterministic pairwise rule cannot reproduce both placement orders.
+The command session supports atomic place, unplace, swap, slot locking and snapshot undo/redo. Commands validate the resulting document with the oracle; command replay persistence, richer editing commands and collaborative synchronization remain unimplemented. The importer expands a subset of Chronexa scoped relations (n_0, n_1, n_2, n_5, n_6, n_7, n_8, n_9, n_10, n_12 and n_13) to card pairs. For n_12/n_13, periods must match only when both cards are on the same day, matching Chronexa’s solver. Other scoped relations remain unsupported. The importer rejects n_0 when matched lessons span multiple periods: direct Chronexa solver checks show order-dependent behavior for doubles, so a deterministic pairwise rule cannot reproduce both placement orders.
 
 The CLI can run `cargo run -p alina-cli -- solve-chronexa tests/fixtures/chronexa-minimal.json /tmp/alina-result.json` and `cargo run -p alina-cli -- verify /tmp/alina-result.json`. This is a synthetic smoke test, not a Chronexa parity or scale benchmark. The importer rejects unrecognized fields and known unsupported scheduling data. Verification reports supported hard violations and occurrence counts; it does not establish comprehensive constraint coverage. Output is provisional Alina JSON, not an aSc or Chronexa round trip.
 
@@ -31,3 +31,5 @@ The Chronexa JSON adapter imports group membership for class-collision checks. I
 Chronexa n_16 first/last placement relations are imported with per-class bell masks and full lesson durations.
 
 The n_7 rule follows Chronexa’s solver: it checks break indices from the explicit school bell strictly between lesson starts on the same day.
+
+The n_5 and n_6 rules compare lesson start periods, as Chronexa does, even for multi-period lessons.

@@ -642,6 +642,12 @@ pub fn verify(doc: &TimetableDoc) -> Report {
             CardRelationKind::SameDay => !same_day,
             CardRelationKind::SameStart => a.start != b.start,
             CardRelationKind::SamePeriodWhenSameDay => same_day && a.start.period != b.start.period,
+            CardRelationKind::AdjacentStarts => {
+                !same_day || a.start.period.abs_diff(b.start.period) != 1
+            }
+            CardRelationKind::OrderedAdjacentStarts => {
+                !same_day || u16::from(a.start.period) + 1 != u16::from(b.start.period)
+            }
             CardRelationKind::Adjacent => {
                 !same_day
                     || (a_end != u16::from(b.start.period) && b_end != u16::from(a.start.period))

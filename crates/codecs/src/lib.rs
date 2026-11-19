@@ -945,6 +945,8 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
                 }
                 (CardRelationKind::NoBreakBetween { break_periods }, true)
             }
+            "n_5" => (CardRelationKind::AdjacentStarts, true),
+            "n_6" => (CardRelationKind::OrderedAdjacentStarts, false),
             "n_1" => (CardRelationKind::DifferentDays, true),
             "n_0" => (CardRelationKind::NotAdjacent, true),
             "n_2" => (CardRelationKind::NoOverlap, false),
@@ -955,6 +957,12 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         };
         let primary = references(relation, "subjectids", &si)?;
         let secondary = references(relation, "subject2ids", &si)?;
+        let first_subject = primary.first().copied().map(SubjectId);
+        let second_subject = secondary
+            .first()
+            .or_else(|| primary.get(1))
+            .copied()
+            .map(SubjectId);
         let leaders: BTreeSet<_> = if secondary.is_empty() {
             primary.iter().take(1).copied().map(SubjectId).collect()
         } else {
@@ -1003,7 +1011,18 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
                 "n_0 with multi-period lessons has order-dependent Chronexa behavior",
             ));
         }
-        if typ == "n_9" {
+        if typ == "n_9" || typ == "n_6" {
+            // n_6 uses only the first subject on each side; n_9 uses both lists.
+            let leaders = if typ == "n_6" {
+                first_subject.into_iter().collect()
+            } else {
+                leaders
+            };
+            let followers = if typ == "n_6" {
+                second_subject.into_iter().collect()
+            } else {
+                followers
+            };
             for &(a, subject_a) in &matching {
                 if !leaders.contains(&subject_a) {
                     continue;
@@ -1051,6 +1070,61 @@ mod tests {
           "classrooms": [{"id":"r", "name":"R", "capacity":25}],
           "subjects": [{"id":"s", "name":"S"}],
           "lessons": [{"id":"l", "subjectId":"s", "teacherIds":["t"], "classIds":["c"], "periodsPerWeek":4, "periodsPerCard":2, "preferredRoomId":"r"}]})
+    }
+    #[test]
+    fn following_relations_use_consecutive_starts_and_preserve_subject_order(
+    ) -> Result<(), ImportError> {
+        use alina_doc::Placement;
+        use alina_oracle::{verify, Violation};
+        use std::sync::Arc;
+        let mut v = input();
+        v["subjects"] = json!([{"id":"a","name":"A"},{"id":"b","name":"B"},{"id":"z","name":"Z"}]);
+        v["lessons"] = json!([
+            {"id":"a", "subjectId":"z", "periodsPerWeek":1},
+            {"id":"b", "subjectId":"a", "periodsPerWeek":1},
+            {"id":"c", "subjectId":"b", "periodsPerWeek":1}
+        ]);
+        v["relations"] = json!([{ "typ":"n_6", "subjectids":["z", "a"], "subject2ids":["b"] }]);
+        let mut doc = import_chronexa_json(&v.to_string())?.document;
+        assert_eq!(doc.hard_limits.card_relations.len(), 1);
+        assert_eq!(
+            (
+                doc.hard_limits.card_relations[0].a,
+                doc.hard_limits.card_relations[0].b
+            ),
+            (CardId(1), CardId(3))
+        );
+        for (id, period) in [(1, 1), (3, 2)] {
+            Arc::make_mut(&mut doc.placements).insert(
+                CardId(id),
+                Placement {
+                    card: CardId(id),
+                    lesson: LessonId(id),
+                    start: TimeSlot { day: 0, period },
+                    room: None,
+                },
+            );
+        }
+        let bad = |d: &TimetableDoc| {
+            verify(d)
+                .violations
+                .iter()
+                .any(|x| matches!(x, Violation::CardRelation { .. }))
+        };
+        assert!(!bad(&doc));
+        if let Some(p) = Arc::make_mut(&mut doc.placements).get_mut(&CardId(3)) {
+            p.start.period = 0;
+        }
+        assert!(bad(&doc));
+        v["relations"] = json!([{ "typ":"n_5", "subjectids":["z", "b"] }]);
+        let mut unordered = import_chronexa_json(&v.to_string())?.document;
+        unordered.placements = doc.placements.clone();
+        assert!(!bad(&unordered));
+        if let Some(p) = Arc::make_mut(&mut unordered.placements).get_mut(&CardId(3)) {
+            p.start.day = 1;
+        }
+        assert!(bad(&unordered));
+        Ok(())
     }
     #[test]
     fn break_between_relation_uses_default_bell_and_starts() -> Result<(), ImportError> {
@@ -1256,7 +1330,7 @@ mod tests {
             .violations
             .iter()
             .any(|x| matches!(x, Violation::CardRelation { .. })));
-        v["relations"][0]["typ"] = json!("n_5");
+        v["relations"][0]["typ"] = json!("n_4");
         assert!(import_chronexa_json(&v.to_string()).is_err());
         v["relations"][0]["disabled"] = json!(true);
         assert!(import_chronexa_json(&v.to_string())?
