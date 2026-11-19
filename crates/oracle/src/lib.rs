@@ -221,6 +221,51 @@ pub fn preview(doc: &TimetableDoc, candidate: Placement) -> Report {
     verify(&copy)
 }
 
+/// Difference between the current timetable and the proposed placement.
+/// Existing violations are not presented as consequences of the move.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Forecast {
+    pub added: Vec<Violation>,
+    pub resolved: Vec<Violation>,
+    pub resulting: Report,
+}
+
+/// Forecast a placement without mutating the document. Differences compare
+/// complete violation values, including affected cards and counts; a changed
+/// count therefore appears as one resolved and one added violation.
+pub fn forecast(doc: &TimetableDoc, candidate: Placement) -> Forecast {
+    let before = verify(doc);
+    let resulting = preview(doc, candidate);
+    // Match as multisets rather than sets in case two distinct checks have
+    // identical reports. Preserve the deterministic oracle order.
+    let mut matched = vec![false; resulting.violations.len()];
+    let mut resolved = Vec::new();
+    for violation in &before.violations {
+        if let Some(index) = resulting
+            .violations
+            .iter()
+            .enumerate()
+            .position(|(i, v)| !matched[i] && v == violation)
+        {
+            matched[index] = true;
+        } else {
+            resolved.push(violation.clone());
+        }
+    }
+    let added = resulting
+        .violations
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !matched[*i])
+        .map(|(_, v)| v.clone())
+        .collect();
+    Forecast {
+        added,
+        resolved,
+        resulting,
+    }
+}
+
 /// Checks the supported constraints in stable ID and slot order. Counts are
 /// placements only; an exact unplaced count requires explicit card identities.
 pub fn verify(doc: &TimetableDoc) -> Report {
@@ -730,6 +775,74 @@ mod tests {
         );
         let r = verify(&d);
         assert_eq!((r.required, r.placed, r.unplaced), (3, 1, 2));
+    }
+    #[test]
+    fn forecast_only_reports_changes_and_does_not_mutate() {
+        let mut d = TimetableDoc::default();
+        d.subjects.insert(
+            SubjectId(1),
+            Subject {
+                id: SubjectId(1),
+                name: "S".into(),
+            },
+        );
+        d.teachers.insert(
+            TeacherId(1),
+            Teacher {
+                id: TeacherId(1),
+                name: "T".into(),
+                availability: alina_foundation::Availability::default(),
+            },
+        );
+        d.lessons.insert(
+            LessonId(1),
+            Lesson {
+                id: LessonId(1),
+                subject: SubjectId(1),
+                teachers: vec![TeacherId(1)],
+                classes: vec![],
+                class_scopes: BTreeMap::new(),
+                student_count: None,
+                duration: 1,
+                occurrences: 3,
+            },
+        );
+        for id in [1, 2] {
+            Arc::make_mut(&mut d.placements).insert(
+                CardId(id),
+                Placement {
+                    card: CardId(id),
+                    lesson: LessonId(1),
+                    start: TimeSlot { day: 0, period: 0 },
+                    room: None,
+                },
+            );
+        }
+        let moved = Placement {
+            card: CardId(2),
+            lesson: LessonId(1),
+            start: TimeSlot { day: 0, period: 1 },
+            room: None,
+        };
+        let result = forecast(&d, moved);
+        assert!(result.added.is_empty());
+        assert!(result
+            .resolved
+            .iter()
+            .any(|v| matches!(v, Violation::TeacherClash { .. })));
+        assert!(result.resulting.violations.is_empty());
+        assert_eq!(d.placements[&CardId(2)].start.period, 0);
+        let unchanged = forecast(
+            &d,
+            Placement {
+                card: CardId(3),
+                lesson: LessonId(1),
+                start: TimeSlot { day: 0, period: 2 },
+                room: None,
+            },
+        );
+        assert!(unchanged.added.is_empty());
+        assert!(unchanged.resolved.is_empty());
     }
     #[test]
     fn class_subject_override_takes_precedence_over_subject_limit() {
