@@ -6,6 +6,7 @@ Chronexa repository inspected at `ef92770` on 2026-11-19. Alina is a separate Ru
 | --- | --- | --- |
 | School setup, teachers, subjects, classes, rooms, lessons, groups, divisions, bells, day/week/term definitions | `js/ui/entities/`, `js/ui/wizard/` | Initial data structures only; groups, bells and patterns missing |
 | aSc XML import/export and round trip | `js/xml/`, `js/ui/` export | Not implemented |
+| Chronexa school JSON import | `js/solver/csp_solver.js` | Strict experimental subset: entities, occurrence expansion, room choices and teacher time-off. Unknown fields and unsupported rules are rejected; real Chronexa files typically contain additional fields and are not yet supported. |
 | Timetable editor, unplaced tray, drag, swap, undo, class/teacher/room views | `js/ui/editor/`, `js/ui/grid_view.js` | Not implemented |
 | Verification and hard/soft constraints | `js/solver/constraints.js`, `constraint_keys.js`, `csp_solver.js` | Initial subset oracle: clashes, availability, capacities, daily limits, period restrictions and explicit pairwise relations; teacher gaps and undesirable periods are reported as unweighted indicators |
 | Generation, improve, advanced relations and diagnostics | `js/solver/csp_solver.js`, `backend/solver_cpsat.py`, `js/solver/wasm/` | Reference backtracking solver and explicit card-pair relations only; scoped relations and soft optimization not implemented |
@@ -22,3 +23,5 @@ The oracle supports conservative split-group conflict checks. Explicit group par
 The reference Rust solver is deliberately bounded and validates candidates through the oracle. It is not optimized for school scale, does not implement Chronexa parity, and cannot yet model all required constraints.
 
 The command session supports atomic place, unplace, swap, slot locking and snapshot undo/redo. Commands validate the resulting document with the oracle; command replay persistence, richer editing commands and collaborative synchronization remain unimplemented. Pairwise ordered and adjacent relations are explicit card-level rules, not yet adapters for Chronexa’s scope-based relations.
+
+The CLI can run `cargo run -p alina-cli -- solve-chronexa tests/fixtures/chronexa-minimal.json /tmp/alina-result.json` and `cargo run -p alina-cli -- verify /tmp/alina-result.json`. This is a synthetic smoke test, not a Chronexa parity or scale benchmark. The importer rejects unrecognized fields and known unsupported scheduling data. Verification reports supported hard violations only and does not establish that every required card is present. Output is provisional Alina JSON, not an aSc or Chronexa round trip.

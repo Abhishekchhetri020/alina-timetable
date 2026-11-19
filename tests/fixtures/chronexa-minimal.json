@@ -1,0 +1,10 @@
+{
+  "schoolName": "Synthetic example",
+  "daysPerWeek": 2,
+  "periodsPerDay": 4,
+  "teachers": [{"id": "t1", "name": "Teacher", "timeOff": {"0_1": "blocked"}}],
+  "classes": [{"id": "c1", "name": "Class", "size": 20}],
+  "classrooms": [{"id": "r1", "name": "Room", "capacity": 25}],
+  "subjects": [{"id": "s1", "name": "Science"}],
+  "lessons": [{"id": "l1", "subjectId": "s1", "teacherIds": ["t1"], "classIds": ["c1"], "periodsPerWeek": 4, "periodsPerCard": 2, "preferredRoomId": "r1"}]
+}

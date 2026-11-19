@@ -6,8 +6,8 @@ Alina is one Rust workspace targeting native desktop and browser WebAssembly. Th
 
 ## Open design decisions
 
-- `TimetableDoc` is a provisional transport structure with public fields; it does **not** enforce the UI mutation boundary. The future `Session` must encapsulate it and expose immutable views and command dispatch only.
-- The requested `Command` trait has no per-invocation undo token. A reusable stateless command cannot reliably undo independent invocations with that signature alone. The history layer must store per-invocation inverse data or snapshots, and transactionally restore state on errors. The trait declaration does not promise undo/redo today.
+- `TimetableDoc` is a provisional transport structure with public fields. `Session` encapsulates its live copy and exposes immutable views and command dispatch; direct mutation of standalone documents remains possible.
+- Commands operate on a private candidate; `Session` commits only after oracle verification and keeps per-execution snapshots for undo/redo. The command trait intentionally has no stateless `undo` method because undo state belongs to each execution.
 - Card identity is separate from lesson identity: a lesson can have multiple occurrences. The model must explicitly represent every unplaced card before exact counts or command IDs can be finalized.
 - Split divisions, slot locks with class scope, substitution dates, soft weights, bell breaks, card requirements, teacher availability validation, room assignment and group overlap semantics need explicit modeling. A 64-bit mask supports only week shapes with at most 64 slots. Validate all bounds and disjoint availability masks at boundaries.
 - Do not claim determinism or a performance target until input ordering, random seeds, platform behavior, algorithms and benchmark fixtures are specified and tested. Conflict reporting must remain reproducible.

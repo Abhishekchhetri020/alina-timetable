@@ -3,3 +3,10 @@ name = "alina-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+alina-doc.workspace = true
+alina-codecs = { path = "../../crates/codecs" }
+alina-oracle = { path = "../../crates/oracle" }
+alina-solver = { path = "../../crates/solver" }
+serde_json.workspace = true

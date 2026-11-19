@@ -9,10 +9,22 @@ version = "0.1.0"
 [[package]]
 name = "alina-cli"
 version = "0.1.0"
+dependencies = [
+ "alina-codecs",
+ "alina-doc",
+ "alina-oracle",
+ "alina-solver",
+ "serde_json",
+]
 
 [[package]]
 name = "alina-codecs"
 version = "0.1.0"
+dependencies = [
+ "alina-doc",
+ "alina-foundation",
+ "serde_json",
+]
 
 [[package]]
 name = "alina-desktop"
