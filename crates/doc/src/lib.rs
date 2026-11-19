@@ -29,6 +29,16 @@ pub struct Subject {
     pub id: SubjectId,
     pub name: String,
 }
+/// A class may be split into disjoint groups within a division. Different
+/// divisions may overlap and therefore conflict conservatively.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ClassScope {
+    Whole,
+    Groups {
+        division: u32,
+        groups: BTreeSet<u32>,
+    },
+}
 /// A lesson is a requirement; cards are its individual occurrences.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Lesson {
@@ -36,6 +46,9 @@ pub struct Lesson {
     pub subject: SubjectId,
     pub teachers: Vec<TeacherId>,
     pub classes: Vec<ClassId>,
+    /// Missing entries mean the whole class. Group capacity is not yet modeled.
+    #[serde(default)]
+    pub class_scopes: BTreeMap<ClassId, ClassScope>,
     pub duration: u8,
     pub occurrences: u16,
 }

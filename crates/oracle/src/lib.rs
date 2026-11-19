@@ -1,7 +1,7 @@
 #![deny(clippy::unwrap_used)]
 //! Independent deterministic checks for the supported document subset.
 //! This is not yet a complete Chronexa constraint oracle.
-use alina_doc::TimetableDoc;
+use alina_doc::{ClassScope, Placement, TimetableDoc};
 use alina_foundation::{CardId, ClassId, RoomId, TeacherId, TimeSlot};
 use std::collections::BTreeMap;
 
@@ -46,6 +46,9 @@ pub enum Violation {
         slot: TimeSlot,
         cards: Vec<CardId>,
     },
+    GroupCapacityUnknown {
+        card: CardId,
+    },
     RoomCapacity {
         card: CardId,
         room: RoomId,
@@ -59,12 +62,40 @@ pub struct Report {
     pub violations: Vec<Violation>,
 }
 
+fn scopes_conflict(a: &ClassScope, b: &ClassScope) -> bool {
+    match (a, b) {
+        (
+            ClassScope::Groups {
+                division: ad,
+                groups: ag,
+            },
+            ClassScope::Groups {
+                division: bd,
+                groups: bg,
+            },
+        ) => {
+            // An empty group set is invalid/unknown: fail conservatively.
+            ag.is_empty() || bg.is_empty() || ad != bd || !ag.is_disjoint(bg)
+        }
+        _ => true,
+    }
+}
+
+/// Preview a candidate without changing the document. The full resulting report
+/// is returned, including existing conflicts, so callers must not mistake it
+/// for a delta or an authorization to place a card.
+pub fn preview(doc: &TimetableDoc, candidate: Placement) -> Report {
+    let mut copy = doc.clone();
+    std::sync::Arc::make_mut(&mut copy.placements).insert(candidate.card, candidate);
+    verify(&copy)
+}
+
 /// Checks the supported constraints in stable ID and slot order. Counts are
 /// placements only; an exact unplaced count requires explicit card identities.
 pub fn verify(doc: &TimetableDoc) -> Report {
     let mut violations = Vec::new();
     let mut teachers: BTreeMap<(TeacherId, TimeSlot), Vec<CardId>> = BTreeMap::new();
-    let mut classes: BTreeMap<(ClassId, TimeSlot), Vec<CardId>> = BTreeMap::new();
+    let mut classes: BTreeMap<(ClassId, TimeSlot), Vec<(CardId, ClassScope)>> = BTreeMap::new();
     let mut rooms: BTreeMap<(RoomId, TimeSlot), Vec<CardId>> = BTreeMap::new();
     let week_ok = doc.days > 0
         && doc.periods_per_day > 0
@@ -107,10 +138,17 @@ pub fn verify(doc: &TimetableDoc) -> Report {
                 });
             }
         }
+        let has_groups = lesson
+            .classes
+            .iter()
+            .any(|c| matches!(lesson.class_scopes.get(c), Some(ClassScope::Groups { .. })));
+        if has_groups && placement.room.is_some() {
+            violations.push(Violation::GroupCapacityUnknown { card: key });
+        }
         if let Some(room) = placement.room {
             match doc.rooms.get(&room) {
                 None => violations.push(Violation::MissingRoom { card: key, room }),
-                Some(r) if size > u64::from(r.capacity) => {
+                Some(r) if !has_groups && size > u64::from(r.capacity) => {
                     violations.push(Violation::RoomCapacity {
                         card: key,
                         room,
@@ -141,7 +179,14 @@ pub fn verify(doc: &TimetableDoc) -> Report {
             }
             for class in &lesson.classes {
                 if doc.classes.contains_key(class) {
-                    classes.entry((*class, slot)).or_default().push(key);
+                    classes.entry((*class, slot)).or_default().push((
+                        key,
+                        lesson
+                            .class_scopes
+                            .get(class)
+                            .cloned()
+                            .unwrap_or(ClassScope::Whole),
+                    ));
                 }
             }
             if let Some(room) = placement.room {
@@ -162,11 +207,19 @@ pub fn verify(doc: &TimetableDoc) -> Report {
             });
         }
     }
-    for ((class, slot), mut cards) in classes {
-        cards.sort();
-        cards.dedup();
-        if cards.len() > 1 {
-            violations.push(Violation::ClassClash { class, slot, cards });
+    for ((class, slot), entries) in classes {
+        // Pairwise reporting avoids incorrectly identifying disjoint groups as
+        // conflicting members of a larger simultaneous slot.
+        for i in 0..entries.len() {
+            for j in (i + 1)..entries.len() {
+                if entries[i].0 != entries[j].0 && scopes_conflict(&entries[i].1, &entries[j].1) {
+                    violations.push(Violation::ClassClash {
+                        class,
+                        slot,
+                        cards: vec![entries[i].0, entries[j].0],
+                    });
+                }
+            }
         }
     }
     for ((room, slot), mut cards) in rooms {
@@ -225,6 +278,7 @@ mod tests {
                     subject: SubjectId(1),
                     teachers: vec![TeacherId(1)],
                     classes: vec![ClassId(1)],
+                    class_scopes: BTreeMap::new(),
                     duration: if n == 1 { 2 } else { 1 },
                     occurrences: 1,
                 },
@@ -262,6 +316,7 @@ mod tests {
                 subject: SubjectId(1),
                 teachers: vec![],
                 classes: vec![],
+                class_scopes: BTreeMap::new(),
                 duration: 2,
                 occurrences: 1,
             },
@@ -279,5 +334,33 @@ mod tests {
             verify(&d).violations,
             vec![Violation::InvalidPlacement { card: CardId(1) }]
         );
+    }
+    #[test]
+    fn split_groups_follow_division_rules() {
+        use std::collections::BTreeSet;
+        let group = |division, ids: &[u32]| ClassScope::Groups {
+            division,
+            groups: ids.iter().copied().collect::<BTreeSet<_>>(),
+        };
+        assert!(!scopes_conflict(&group(1, &[1]), &group(1, &[2])));
+        assert!(scopes_conflict(&group(1, &[1]), &group(1, &[1, 2])));
+        assert!(scopes_conflict(&group(1, &[1]), &group(2, &[2])));
+        assert!(scopes_conflict(&ClassScope::Whole, &group(1, &[2])));
+        assert!(scopes_conflict(&group(1, &[]), &group(1, &[2])));
+    }
+    #[test]
+    fn preview_does_not_mutate_original() {
+        let original = TimetableDoc::default();
+        let candidate = Placement {
+            card: CardId(1),
+            lesson: LessonId(99),
+            start: TimeSlot { day: 0, period: 0 },
+            room: None,
+        };
+        let report = preview(&original, candidate);
+        assert!(report
+            .violations
+            .contains(&Violation::MissingLesson { card: CardId(1) }));
+        assert!(original.placements.is_empty());
     }
 }
