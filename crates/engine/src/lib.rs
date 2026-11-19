@@ -62,7 +62,7 @@ impl CommandRegistry {
 }
 struct HistoryEntry {
     doc: TimetableDoc,
-    command: CommandSpec,
+    commands: Vec<CommandSpec>,
 }
 /// Schedule state is exposed read-only; only registered commands can change it.
 pub struct Session {
@@ -93,13 +93,30 @@ impl Session {
         &self.doc
     }
     pub fn dispatch(&mut self, spec: CommandSpec) -> Result<Value, CommandError> {
-        let command = self
-            .registry
-            .commands
-            .get(&spec.id)
-            .ok_or_else(|| CommandError::new("unknown command"))?;
+        let mut results = self.dispatch_transaction(vec![spec])?;
+        results
+            .pop()
+            .ok_or_else(|| CommandError::new("missing command result"))
+    }
+    /// Apply all commands to an isolated candidate and validate the final
+    /// state once. The transaction creates one undo/redo history entry.
+    pub fn dispatch_transaction(
+        &mut self,
+        specs: Vec<CommandSpec>,
+    ) -> Result<Vec<Value>, CommandError> {
+        if specs.is_empty() {
+            return Err(CommandError::new("empty transaction"));
+        }
         let mut candidate = self.doc.clone();
-        let result = command.execute(&mut candidate, spec.params.clone())?;
+        let mut results = Vec::with_capacity(specs.len());
+        for spec in &specs {
+            let command = self
+                .registry
+                .commands
+                .get(&spec.id)
+                .ok_or_else(|| CommandError::new("unknown command"))?;
+            results.push(command.execute(&mut candidate, spec.params.clone())?);
+        }
         if !alina_oracle::verify(&candidate).violations.is_empty() {
             return Err(CommandError::new(
                 "command would produce an invalid timetable",
@@ -108,13 +125,13 @@ impl Session {
         let previous = std::mem::replace(&mut self.doc, candidate);
         self.undo.push(HistoryEntry {
             doc: previous,
-            command: spec,
+            commands: specs,
         });
         if self.undo.len() > self.history_limit {
             self.undo.remove(0);
         }
         self.redo.clear();
-        Ok(result)
+        Ok(results)
     }
     pub fn undo(&mut self) -> bool {
         let Some(entry) = self.undo.pop() else {
@@ -123,7 +140,7 @@ impl Session {
         let doc = std::mem::replace(&mut self.doc, entry.doc);
         self.redo.push(HistoryEntry {
             doc,
-            command: entry.command,
+            commands: entry.commands,
         });
         true
     }
@@ -134,7 +151,7 @@ impl Session {
         let doc = std::mem::replace(&mut self.doc, entry.doc);
         self.undo.push(HistoryEntry {
             doc,
-            command: entry.command,
+            commands: entry.commands,
         });
         true
     }
@@ -325,6 +342,54 @@ mod tests {
             id: "card.unplace".into(),
             params: json!({"card_id":1}),
         })?;
+        Ok(())
+    }
+    #[test]
+    fn transaction_repairs_multiple_clashes_and_undoes_as_one() -> Result<(), CommandError> {
+        use alina_doc::Teacher;
+        use alina_foundation::{Availability, TeacherId};
+        let mut session = fixture();
+        session.doc.teachers.insert(
+            TeacherId(1),
+            Teacher {
+                id: TeacherId(1),
+                name: "T".into(),
+                availability: Availability::default(),
+            },
+        );
+        if let Some(lesson) = session.doc.lessons.get_mut(&LessonId(1)) {
+            lesson.teachers = vec![TeacherId(1)];
+            lesson.occurrences = 4;
+        }
+        for (card, period) in [(1, 0), (2, 0), (3, 2), (4, 2)] {
+            Arc::make_mut(&mut session.doc.placements).insert(
+                CardId(card),
+                Placement {
+                    card: CardId(card),
+                    lesson: LessonId(1),
+                    start: TimeSlot { day: 0, period },
+                    room: None,
+                },
+            );
+        }
+        let remove = |card| CommandSpec {
+            id: "card.unplace".into(),
+            params: json!({"card_id":card}),
+        };
+        assert!(session.dispatch(remove(2)).is_err());
+        session.dispatch_transaction(vec![remove(2), remove(4)])?;
+        assert_eq!(session.document().placements.len(), 2);
+        assert!(alina_oracle::verify(session.document())
+            .violations
+            .is_empty());
+        assert!(session.undo());
+        assert_eq!(session.document().placements.len(), 4);
+        assert!(session.redo());
+        assert_eq!(session.document().placements.len(), 2);
+        assert!(session
+            .dispatch_transaction(vec![remove(1), remove(99)])
+            .is_err());
+        assert_eq!(session.document().placements.len(), 2);
         Ok(())
     }
 }
