@@ -227,6 +227,55 @@ impl Search<'_> {
                     {
                         continue;
                     }
+                    // Reject static impossibilities before the full oracle preview.
+                    let limits = &self.doc.hard_limits;
+                    let start = TimeSlot { day: d, period: p };
+                    if limits
+                        .card_fixed_start
+                        .get(&r.card)
+                        .is_some_and(|slot| *slot != start)
+                        || limits
+                            .lesson_fixed_start
+                            .get(&r.lesson)
+                            .is_some_and(|slot| *slot != start)
+                        || limits
+                            .lesson_allowed_days
+                            .get(&r.lesson)
+                            .is_some_and(|mask| mask & (1u64 << d) == 0)
+                        || limits
+                            .lesson_allowed_starts
+                            .get(&r.lesson)
+                            .is_some_and(|mask| mask & (1u64 << p) == 0)
+                        || limits
+                            .subject_banned_starts
+                            .get(&lesson.subject)
+                            .is_some_and(|mask| mask & (1u64 << p) != 0)
+                        || limits
+                            .subject_banned_ends
+                            .get(&lesson.subject)
+                            .is_some_and(|mask| mask & (1u64 << (end - 1)) != 0)
+                    {
+                        continue;
+                    }
+                    let span = span_mask(&self.doc, start, lesson.duration);
+                    if lesson.teachers.iter().any(|teacher| {
+                        self.doc
+                            .teachers
+                            .get(teacher)
+                            .is_some_and(|t| t.availability.blocked & span != 0)
+                    }) || lesson.classes.iter().any(|class| {
+                        limits
+                            .class_blocked_slots
+                            .get(class)
+                            .is_some_and(|mask| mask & span != 0)
+                    }) || room.is_some_and(|room| {
+                        limits
+                            .room_blocked_slots
+                            .get(&room)
+                            .is_some_and(|mask| mask & span != 0)
+                    }) {
+                        continue;
+                    }
                     let candidate = Placement {
                         card: r.card,
                         lesson: r.lesson,
@@ -446,6 +495,58 @@ mod tests {
         assert_eq!(solve(&d, &req, 100)?.status, Status::Complete);
         assert_eq!(solve(&d, &req[..1], 100)?.status, Status::RequestComplete);
         Ok(())
+    }
+    #[test]
+    fn static_filters_preserve_all_oracle_valid_candidates() {
+        let mut d = fixture();
+        d.days = 2;
+        d.periods_per_day = 4;
+        if let Some(l) = d.lessons.get_mut(&LessonId(1)) {
+            l.duration = 2;
+        }
+        d.hard_limits.lesson_allowed_days.insert(LessonId(1), 0b10);
+        d.hard_limits
+            .lesson_allowed_starts
+            .insert(LessonId(1), 0b0111);
+        d.hard_limits
+            .subject_banned_starts
+            .insert(SubjectId(1), 0b0010);
+        d.hard_limits
+            .subject_banned_ends
+            .insert(SubjectId(1), 0b1000);
+        d.hard_limits.class_blocked_slots.insert(ClassId(1), 1 << 4);
+        let req = CardRequest {
+            card: CardId(1),
+            lesson: LessonId(1),
+            rooms: vec![],
+        };
+        let search = Search {
+            doc: d.clone(),
+            requests: std::slice::from_ref(&req),
+            budget: 100,
+            nodes: 0,
+            best: vec![],
+            current: vec![],
+            limited: false,
+        };
+        let actual = search.candidates(&req, &Occupancy::from_doc(&d), None);
+        let expected: Vec<_> = (0..d.days)
+            .flat_map(|day| (0..d.periods_per_day).map(move |period| TimeSlot { day, period }))
+            .filter(|start| {
+                alina_oracle::preview(
+                    &d,
+                    Placement {
+                        card: req.card,
+                        lesson: req.lesson,
+                        start: *start,
+                        room: None,
+                    },
+                )
+                .violations
+                .is_empty()
+            })
+            .collect();
+        assert_eq!(actual.iter().map(|p| p.start).collect::<Vec<_>>(), expected);
     }
     #[test]
     fn missing_relation_endpoint_is_rejected() {
