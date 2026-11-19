@@ -272,7 +272,23 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             ],
             "group",
         )?;
-        reject_fields(group, &["studentCount", "studentIds"], "group")?;
+        reject_fields(group, &["studentIds"], "group")?;
+        let count = match group.get("studentCount") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if s.is_empty() => None,
+            Some(Value::String(s)) => Some(
+                s.parse::<u32>()
+                    .map_err(|_| err("invalid group studentCount"))?,
+            ),
+            Some(Value::Number(n)) => Some(
+                u32::try_from(
+                    n.as_u64()
+                        .ok_or_else(|| err("invalid group studentCount"))?,
+                )
+                .map_err(|_| err("invalid group studentCount"))?,
+            ),
+            _ => return Err(err("invalid group studentCount")),
+        };
         let source = string(group, "id")?;
         let class = string(group, "classId")?;
         let class = ClassId(
@@ -290,7 +306,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             _ => return Err(err("invalid group entireClass")),
         };
         let id = u32::try_from(group_ids[source]).map_err(|_| err("too many groups"))?;
-        groups.insert(id, (class, division, entire));
+        groups.insert(id, (class, division, entire, count));
     }
     let mut doc = TimetableDoc {
         days,
@@ -642,7 +658,8 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         let mut class_scopes: BTreeMap<ClassId, ClassScope> = BTreeMap::new();
         for id in references(l, "groupIds", &group_ids)? {
             let id = u32::try_from(id).map_err(|_| err("invalid group ID"))?;
-            let &(class, division, entire) = groups.get(&id).ok_or_else(|| err("unknown group"))?;
+            let &(class, division, entire, _) =
+                groups.get(&id).ok_or_else(|| err("unknown group"))?;
             if !class_ids.contains(&class) {
                 return Err(err(format!(
                     "lesson {source} references a group outside its classes"
@@ -671,6 +688,31 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
                     )))
                 }
             }
+        }
+        // Counts can be summed only for known disjoint groups within a single
+        // division and distinct classes. Unknown input must remain unknown.
+        let mut participant_count = Some(0u32);
+        for class in &class_ids {
+            let count = match class_scopes.get(class) {
+                Some(ClassScope::Groups {
+                    groups: selected, ..
+                }) => selected
+                    .iter()
+                    .try_fold(0u32, |sum, id| sum.checked_add(groups.get(id)?.3?)),
+                _ => doc
+                    .classes
+                    .get(class)
+                    .and_then(|c| (c.size > 0).then_some(c.size)),
+            };
+            participant_count = participant_count
+                .zip(count)
+                .and_then(|(sum, n)| sum.checked_add(n));
+        }
+        if !class_scopes
+            .values()
+            .any(|scope| matches!(scope, ClassScope::Groups { .. }))
+        {
+            participant_count = None;
         }
         let teacher_ids = references(l, "teacherIds", &ti)?
             .into_iter()
@@ -709,7 +751,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
                 teachers: teacher_ids,
                 classes: class_ids,
                 class_scopes,
-                student_count: None,
+                student_count: participant_count,
                 duration,
                 occurrences,
             },
@@ -782,6 +824,54 @@ mod tests {
           "classrooms": [{"id":"r", "name":"R", "capacity":25}],
           "subjects": [{"id":"s", "name":"S"}],
           "lessons": [{"id":"l", "subjectId":"s", "teacherIds":["t"], "classIds":["c"], "periodsPerWeek":4, "periodsPerCard":2, "preferredRoomId":"r"}]})
+    }
+    #[test]
+    fn split_group_sizes_control_room_capacity_without_guessing() -> Result<(), ImportError> {
+        use alina_doc::Placement;
+        use alina_oracle::{verify, Violation};
+        use std::sync::Arc;
+        let mut v = input();
+        v["groups"] = json!([
+            {"id":"a", "classId":"c", "divisionTag":1, "studentCount":"10"},
+            {"id":"b", "classId":"c", "divisionTag":1, "studentCount":16}
+        ]);
+        v["lessons"][0]["groupIds"] = json!(["a", "b"]);
+        let check = |v: &Value| -> Result<Vec<Violation>, ImportError> {
+            let mut doc = import_chronexa_json(&v.to_string())?.document;
+            Arc::make_mut(&mut doc.placements).insert(
+                CardId(1),
+                Placement {
+                    card: CardId(1),
+                    lesson: LessonId(1),
+                    start: TimeSlot { day: 0, period: 0 },
+                    room: Some(RoomId(1)),
+                },
+            );
+            Ok(verify(&doc).violations)
+        };
+        assert!(check(&v)?.iter().any(|x| matches!(
+            x,
+            Violation::RoomCapacity {
+                required: 26,
+                capacity: 25,
+                ..
+            }
+        )));
+        v["groups"][1]["studentCount"] = json!(15);
+        assert!(!check(&v)?.iter().any(|x| matches!(
+            x,
+            Violation::RoomCapacity { .. } | Violation::GroupCapacityUnknown { .. }
+        )));
+        v["groups"][1]
+            .as_object_mut()
+            .ok_or_else(|| err("group"))?
+            .remove("studentCount");
+        assert!(check(&v)?
+            .iter()
+            .any(|x| matches!(x, Violation::GroupCapacityUnknown { .. })));
+        v["groups"][1]["studentCount"] = json!("invalid");
+        assert!(import_chronexa_json(&v.to_string()).is_err());
+        Ok(())
     }
     #[test]
     fn imports_split_groups_and_verifies_parallel_lessons() -> Result<(), ImportError> {
