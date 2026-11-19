@@ -1,7 +1,9 @@
 #![deny(clippy::unwrap_used)]
 //! Explicit, conservative adapter for a subset of Chronexa's school JSON.
 //! Unsupported rule-bearing data is rejected rather than silently discarded.
-use alina_doc::{Class, ClassScope, Lesson, Room, Subject, Teacher, TimetableDoc};
+use alina_doc::{
+    CardRelation, CardRelationKind, Class, ClassScope, Lesson, Room, Subject, Teacher, TimetableDoc,
+};
 use alina_foundation::{
     Availability, CardId, ClassId, LessonId, RoomId, SubjectId, TeacherId, TimeSlot,
 };
@@ -230,7 +232,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         ],
         "school",
     )?;
-    reject_fields(&root, &["relations", "divisions", "globals"], "school")?;
+    reject_fields(&root, &["divisions", "globals"], "school")?;
     let days =
         u8::try_from(number(&root, "daysPerWeek", 5)?).map_err(|_| err("invalid daysPerWeek"))?;
     let periods = u8::try_from(number(&root, "periodsPerDay", 8)?)
@@ -806,6 +808,96 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         }
         cards.insert(source.to_owned(), occurrence_ids);
     }
+    // Chronexa expands these relations to every matching occurrence pair.
+    // Other relation kinds need non-pairwise or soft semantics and remain rejected.
+    let relations = match root.get("relations") {
+        None | Some(Value::Null) => &[][..],
+        Some(Value::Array(items)) => items.as_slice(),
+        _ => return Err(err("relations must be an array")),
+    };
+    for relation in relations {
+        allowed_fields(
+            relation,
+            &[
+                "id",
+                "typ",
+                "importance",
+                "note",
+                "disabled",
+                "subjectids",
+                "subject2ids",
+                "classids",
+                "teacherids",
+                "classroomids",
+                "positions",
+                "positions2",
+                "param1",
+                "param2",
+                "filter",
+                "filter2",
+                "applyto",
+            ],
+            "relation",
+        )?;
+        match relation.get("disabled") {
+            Some(Value::Bool(true)) => continue,
+            None | Some(Value::Null) | Some(Value::Bool(false)) => {}
+            _ => return Err(err("invalid relation disabled")),
+        }
+        reject_fields(
+            relation,
+            &[
+                "teacherids",
+                "classroomids",
+                "positions",
+                "positions2",
+                "param1",
+                "param2",
+                "filter",
+                "filter2",
+                "applyto",
+            ],
+            "relation",
+        )?;
+        let typ = string(relation, "typ")?;
+        let (kind, cross_subject) = match typ {
+            "n_1" => (CardRelationKind::DifferentDays, true),
+            "n_0" => (CardRelationKind::NotAdjacent, true),
+            "n_2" => (CardRelationKind::NoOverlap, false),
+            "n_8" | "n_10" => (CardRelationKind::SameDay, true),
+            "n_12" | "n_13" => (CardRelationKind::SameStart, false),
+            _ => return Err(err(format!("unsupported relation type {typ}"))),
+        };
+        let mut subjects = references(relation, "subjectids", &si)?;
+        subjects.extend(references(relation, "subject2ids", &si)?);
+        let subjects: BTreeSet<_> = subjects.into_iter().map(SubjectId).collect();
+        let classes: BTreeSet<_> = references(relation, "classids", &ci)?
+            .into_iter()
+            .map(ClassId)
+            .collect();
+        let mut matching = Vec::new();
+        for request in &requests {
+            let l = &doc.lessons[&request.lesson];
+            if (!subjects.is_empty() && !subjects.contains(&l.subject))
+                || (!classes.is_empty() && !l.classes.iter().any(|c| classes.contains(c)))
+            {
+                continue;
+            }
+            matching.push((request.card, l.subject));
+        }
+        for a in 0..matching.len() {
+            for b in a + 1..matching.len() {
+                if cross_subject && matching[a].1 == matching[b].1 {
+                    continue;
+                }
+                doc.hard_limits.card_relations.push(CardRelation {
+                    a: matching[a].0,
+                    b: matching[b].0,
+                    kind: kind.clone(),
+                });
+            }
+        }
+    }
     Ok(ChronexaImport {
         document: doc,
         requests,
@@ -824,6 +916,46 @@ mod tests {
           "classrooms": [{"id":"r", "name":"R", "capacity":25}],
           "subjects": [{"id":"s", "name":"S"}],
           "lessons": [{"id":"l", "subjectId":"s", "teacherIds":["t"], "classIds":["c"], "periodsPerWeek":4, "periodsPerCard":2, "preferredRoomId":"r"}]})
+    }
+    #[test]
+    fn scoped_relations_expand_to_matching_occurrences() -> Result<(), ImportError> {
+        use alina_doc::Placement;
+        use alina_oracle::{verify, Violation};
+        use std::sync::Arc;
+        let mut v = input();
+        v["subjects"] = json!([{"id":"s", "name":"S"}, {"id":"t", "name":"T"}]);
+        v["lessons"] = json!([
+            {"id":"a", "subjectId":"s", "periodsPerWeek":2},
+            {"id":"b", "subjectId":"t", "periodsPerWeek":1}
+        ]);
+        v["relations"] =
+            json!([{ "typ":"n_1", "subjectids":["s"], "subject2ids":["t"], "classids":[] }]);
+        let mut imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(imported.document.hard_limits.card_relations.len(), 2);
+        for (card, lesson, period) in [(1, 1, 0), (3, 2, 2)] {
+            Arc::make_mut(&mut imported.document.placements).insert(
+                CardId(card),
+                Placement {
+                    card: CardId(card),
+                    lesson: LessonId(lesson),
+                    start: TimeSlot { day: 0, period },
+                    room: None,
+                },
+            );
+        }
+        assert!(verify(&imported.document)
+            .violations
+            .iter()
+            .any(|x| matches!(x, Violation::CardRelation { .. })));
+        v["relations"][0]["typ"] = json!("n_5");
+        assert!(import_chronexa_json(&v.to_string()).is_err());
+        v["relations"][0]["disabled"] = json!(true);
+        assert!(import_chronexa_json(&v.to_string())?
+            .document
+            .hard_limits
+            .card_relations
+            .is_empty());
+        Ok(())
     }
     #[test]
     fn split_group_sizes_control_room_capacity_without_guessing() -> Result<(), ImportError> {
