@@ -69,6 +69,12 @@ pub enum Violation {
         actual: usize,
         limit: u8,
     },
+    SubjectParallelLimit {
+        subject: alina_foundation::SubjectId,
+        slot: TimeSlot,
+        actual: usize,
+        limit: u16,
+    },
     InvalidPlacement {
         card: CardId,
     },
@@ -123,6 +129,10 @@ pub enum Violation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
     pub placed: usize,
+    /// Number of required occurrences, independent of placement validity.
+    pub required: usize,
+    /// Missing occurrences by lesson count. This does not identify card IDs.
+    pub unplaced: usize,
     pub violations: Vec<Violation>,
 }
 
@@ -222,6 +232,8 @@ pub fn verify(doc: &TimetableDoc) -> Report {
         std::collections::BTreeSet<u8>,
     > = BTreeMap::new();
     let mut rooms: BTreeMap<(RoomId, TimeSlot), Vec<CardId>> = BTreeMap::new();
+    let mut subject_parallel: BTreeMap<(alina_foundation::SubjectId, TimeSlot), usize> =
+        BTreeMap::new();
     let week_ok = doc.days > 0
         && doc.periods_per_day > 0
         && u16::from(doc.days) * u16::from(doc.periods_per_day) <= 64;
@@ -237,6 +249,18 @@ pub fn verify(doc: &TimetableDoc) -> Report {
     for placement in doc.placements.values() {
         *lesson_counts.entry(placement.lesson).or_insert(0usize) += 1;
     }
+    let required = doc
+        .lessons
+        .values()
+        .map(|l| usize::from(l.occurrences))
+        .sum();
+    let unplaced = doc
+        .lessons
+        .iter()
+        .map(|(id, lesson)| {
+            usize::from(lesson.occurrences).saturating_sub(*lesson_counts.get(id).unwrap_or(&0))
+        })
+        .sum();
     for (lesson, actual) in lesson_counts {
         if let Some(def) = doc.lessons.get(&lesson) {
             if actual > usize::from(def.occurrences) {
@@ -372,6 +396,7 @@ pub fn verify(doc: &TimetableDoc) -> Report {
                 period,
             };
             let bit = u32::from(slot.day) * u32::from(doc.periods_per_day) + u32::from(slot.period);
+            *subject_parallel.entry((lesson.subject, slot)).or_default() += 1;
             for teacher in &lesson.teachers {
                 if let Some(t) = doc.teachers.get(teacher) {
                     teachers.entry((*teacher, slot)).or_default().push(key);
@@ -428,6 +453,18 @@ pub fn verify(doc: &TimetableDoc) -> Report {
                     }
                     rooms.entry((room, slot)).or_default().push(key);
                 }
+            }
+        }
+    }
+    for ((subject, slot), actual) in subject_parallel {
+        if let Some(&limit) = doc.hard_limits.subject_max_parallel.get(&subject) {
+            if actual > usize::from(limit) {
+                violations.push(Violation::SubjectParallelLimit {
+                    subject,
+                    slot,
+                    actual,
+                    limit,
+                });
             }
         }
     }
@@ -550,6 +587,8 @@ pub fn verify(doc: &TimetableDoc) -> Report {
     }
     Report {
         placed: doc.placements.len(),
+        required,
+        unplaced,
         violations,
     }
 }
@@ -604,6 +643,80 @@ mod tests {
                 teacher_undesirable_periods: 1
             }
         );
+    }
+    #[test]
+    fn subject_parallel_limit_counts_each_period_of_a_double() {
+        let mut d = TimetableDoc::default();
+        d.subjects.insert(
+            SubjectId(1),
+            Subject {
+                id: SubjectId(1),
+                name: "S".into(),
+            },
+        );
+        d.lessons.insert(
+            LessonId(1),
+            Lesson {
+                id: LessonId(1),
+                subject: SubjectId(1),
+                teachers: vec![],
+                classes: vec![],
+                class_scopes: BTreeMap::new(),
+                student_count: None,
+                duration: 2,
+                occurrences: 2,
+            },
+        );
+        d.hard_limits.subject_max_parallel.insert(SubjectId(1), 1);
+        for (id, period) in [(1, 0), (2, 1)] {
+            Arc::make_mut(&mut d.placements).insert(
+                CardId(id),
+                Placement {
+                    card: CardId(id),
+                    lesson: LessonId(1),
+                    start: TimeSlot { day: 0, period },
+                    room: None,
+                },
+            );
+        }
+        assert!(verify(&d)
+            .violations
+            .contains(&Violation::SubjectParallelLimit {
+                subject: SubjectId(1),
+                slot: TimeSlot { day: 0, period: 1 },
+                actual: 2,
+                limit: 1
+            }));
+    }
+    #[test]
+    fn counts_unplaced_occurrences_per_lesson() {
+        let mut d = TimetableDoc::default();
+        d.lessons.insert(
+            LessonId(1),
+            Lesson {
+                id: LessonId(1),
+                subject: SubjectId(1),
+                teachers: vec![],
+                classes: vec![],
+                class_scopes: BTreeMap::new(),
+                student_count: None,
+                duration: 1,
+                occurrences: 3,
+            },
+        );
+        let r = verify(&d);
+        assert_eq!((r.required, r.placed, r.unplaced), (3, 0, 3));
+        Arc::make_mut(&mut d.placements).insert(
+            CardId(1),
+            Placement {
+                card: CardId(1),
+                lesson: LessonId(1),
+                start: TimeSlot { day: 0, period: 0 },
+                room: None,
+            },
+        );
+        let r = verify(&d);
+        assert_eq!((r.required, r.placed, r.unplaced), (3, 1, 2));
     }
     #[test]
     fn detects_clashes_in_second_period_and_capacity() {

@@ -9,14 +9,16 @@ fn run() -> Result<bool, Box<dyn std::error::Error>> {
             let doc: TimetableDoc = serde_json::from_str(&fs::read_to_string(path)?)?;
             let report = alina_oracle::verify(&doc);
             println!(
-                "Placed: {}\nHard violations: {}",
+                "Placed: {}\nRequired: {}\nUnplaced: {}\nHard violations: {}",
                 report.placed,
+                report.required,
+                report.unplaced,
                 report.violations.len()
             );
             for violation in &report.violations {
                 println!("{violation:?}");
             }
-            Ok(report.violations.is_empty())
+            Ok(report.violations.is_empty() && report.unplaced == 0)
         }
         [command, path, out] if command == "solve-chronexa" => {
             let imported = alina_codecs::import_chronexa_json(&fs::read_to_string(path)?)?;

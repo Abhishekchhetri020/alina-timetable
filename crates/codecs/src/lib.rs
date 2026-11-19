@@ -399,9 +399,27 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         );
     }
     for s in subjects {
-        allowed_fields(s, &["id", "name", "color", "constraints"], "subject")?;
+        allowed_fields(
+            s,
+            &["id", "name", "color", "constraints", "maxParallel"],
+            "subject",
+        )?;
         reject_fields(s, &["constraints"], "subject")?;
         let id = SubjectId(si[string(s, "id")?]);
+        if let Some(value) = s.get("maxParallel") {
+            if !value.is_null() {
+                let limit = value
+                    .as_u64()
+                    .ok_or_else(|| err("invalid subject maxParallel"))?;
+                // Chronexa treats zero as unrestricted.
+                if limit > 0 {
+                    doc.hard_limits.subject_max_parallel.insert(
+                        id,
+                        u16::try_from(limit).map_err(|_| err("subject maxParallel too large"))?,
+                    );
+                }
+            }
+        }
         doc.subjects.insert(
             id,
             Subject {
