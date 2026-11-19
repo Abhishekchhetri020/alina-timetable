@@ -632,6 +632,13 @@ pub fn verify(doc: &TimetableDoc) -> Report {
                 same_day
                     && (a_end == u16::from(b.start.period) || b_end == u16::from(a.start.period))
             }
+            CardRelationKind::NoBreakBetween { break_periods } => {
+                let lo = a.start.period.min(b.start.period);
+                let hi = a.start.period.max(b.start.period);
+                same_day
+                    && ((u16::from(lo) + 1)..u16::from(hi))
+                        .any(|p| p < 64 && break_periods & (1u64 << p) != 0)
+            }
             CardRelationKind::SameDay => !same_day,
             CardRelationKind::SameStart => a.start != b.start,
             CardRelationKind::SamePeriodWhenSameDay => same_day && a.start.period != b.start.period,

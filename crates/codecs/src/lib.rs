@@ -927,6 +927,24 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             continue;
         }
         let (kind, cross_subject) = match typ {
+            "n_7" => {
+                let mut break_periods = 0u64;
+                if let Some(entries) = root
+                    .get("bell")
+                    .and_then(|b| b.get("periods"))
+                    .and_then(Value::as_array)
+                {
+                    for entry in entries {
+                        if entry.get("isTeaching") == Some(&Value::Bool(false)) {
+                            let index = number(entry, "index", 0)?;
+                            if (1..=64).contains(&index) {
+                                break_periods |= 1u64 << (index - 1);
+                            }
+                        }
+                    }
+                }
+                (CardRelationKind::NoBreakBetween { break_periods }, true)
+            }
             "n_1" => (CardRelationKind::DifferentDays, true),
             "n_0" => (CardRelationKind::NotAdjacent, true),
             "n_2" => (CardRelationKind::NoOverlap, false),
@@ -1033,6 +1051,50 @@ mod tests {
           "classrooms": [{"id":"r", "name":"R", "capacity":25}],
           "subjects": [{"id":"s", "name":"S"}],
           "lessons": [{"id":"l", "subjectId":"s", "teacherIds":["t"], "classIds":["c"], "periodsPerWeek":4, "periodsPerCard":2, "preferredRoomId":"r"}]})
+    }
+    #[test]
+    fn break_between_relation_uses_default_bell_and_starts() -> Result<(), ImportError> {
+        use alina_doc::Placement;
+        use alina_oracle::{verify, Violation};
+        use std::sync::Arc;
+        let mut v = input();
+        v["subjects"] = json!([{"id":"a", "name":"A"}, {"id":"b", "name":"B"}]);
+        v["lessons"] = json!([
+            {"id":"a", "subjectId":"a", "periodsPerWeek":1},
+            {"id":"b", "subjectId":"b", "periodsPerWeek":1}
+        ]);
+        v["bell"] =
+            json!({"periods":[{"index":1},{"index":2,"isTeaching":false},{"index":3},{"index":4}]});
+        v["relations"] = json!([{ "typ":"n_7", "subjectids":["a", "b"] }]);
+        let mut doc = import_chronexa_json(&v.to_string())?.document;
+        for (id, period) in [(1, 0), (2, 2)] {
+            Arc::make_mut(&mut doc.placements).insert(
+                CardId(id),
+                Placement {
+                    card: CardId(id),
+                    lesson: LessonId(id),
+                    start: TimeSlot { day: 0, period },
+                    room: None,
+                },
+            );
+        }
+        let conflict = |d: &TimetableDoc| {
+            verify(d)
+                .violations
+                .iter()
+                .any(|v| matches!(v, Violation::CardRelation { .. }))
+        };
+        assert!(conflict(&doc));
+        if let Some(p) = Arc::make_mut(&mut doc.placements).get_mut(&CardId(2)) {
+            p.start.day = 1;
+        }
+        assert!(!conflict(&doc));
+        if let Some(p) = Arc::make_mut(&mut doc.placements).get_mut(&CardId(2)) {
+            p.start.day = 0;
+            p.start.period = 1;
+        }
+        assert!(!conflict(&doc)); // Break at an endpoint is not strictly between starts.
+        Ok(())
     }
     #[test]
     fn first_bell_is_default_when_school_bell_is_missing() -> Result<(), ImportError> {

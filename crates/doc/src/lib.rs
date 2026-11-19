@@ -68,6 +68,10 @@ pub enum CardRelationKind {
     DifferentDays,
     NoOverlap,
     NotAdjacent,
+    /// No listed break period may lie strictly between card starts on one day.
+    NoBreakBetween {
+        break_periods: u64,
+    },
     SameDay,
     SameStart,
     /// On the same day, both starts must use the same period.
