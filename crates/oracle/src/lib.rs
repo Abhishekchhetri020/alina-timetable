@@ -16,6 +16,29 @@ pub enum Violation {
         actual: usize,
         limit: u16,
     },
+    LessonStartNotAllowed {
+        card: CardId,
+    },
+    SubjectStartBanned {
+        card: CardId,
+    },
+    SubjectEndBanned {
+        card: CardId,
+    },
+    RoomNotAllowed {
+        card: CardId,
+        room: Option<RoomId>,
+    },
+    ClassUnavailable {
+        card: CardId,
+        class: ClassId,
+        slot: TimeSlot,
+    },
+    RoomUnavailable {
+        card: CardId,
+        room: RoomId,
+        slot: TimeSlot,
+    },
     DayNotAllowed {
         card: CardId,
     },
@@ -193,6 +216,43 @@ pub fn verify(doc: &TimetableDoc) -> Report {
                 violations.push(Violation::FixedStartMismatch { card: key });
             }
         }
+        let start_bit = 1u64 << placement.start.period;
+        let end_bit = 1u64 << (end - 1);
+        if doc
+            .hard_limits
+            .lesson_allowed_starts
+            .get(&placement.lesson)
+            .is_some_and(|mask| mask & start_bit == 0)
+        {
+            violations.push(Violation::LessonStartNotAllowed { card: key });
+        }
+        if doc
+            .hard_limits
+            .subject_banned_starts
+            .get(&lesson.subject)
+            .is_some_and(|mask| mask & start_bit != 0)
+        {
+            violations.push(Violation::SubjectStartBanned { card: key });
+        }
+        if doc
+            .hard_limits
+            .subject_banned_ends
+            .get(&lesson.subject)
+            .is_some_and(|mask| mask & end_bit != 0)
+        {
+            violations.push(Violation::SubjectEndBanned { card: key });
+        }
+        if doc
+            .hard_limits
+            .lesson_allowed_rooms
+            .get(&placement.lesson)
+            .is_some_and(|allowed| placement.room.is_none_or(|room| !allowed.contains(&room)))
+        {
+            violations.push(Violation::RoomNotAllowed {
+                card: key,
+                room: placement.room,
+            });
+        }
         let mut size = 0u64;
         for class in &lesson.classes {
             match doc.classes.get(class) {
@@ -252,6 +312,18 @@ pub fn verify(doc: &TimetableDoc) -> Report {
             }
             for class in &lesson.classes {
                 if doc.classes.contains_key(class) {
+                    if doc
+                        .hard_limits
+                        .class_blocked_slots
+                        .get(class)
+                        .is_some_and(|mask| mask & (1u64 << bit) != 0)
+                    {
+                        violations.push(Violation::ClassUnavailable {
+                            card: key,
+                            class: *class,
+                            slot,
+                        });
+                    }
                     subject_slots
                         .entry((*class, lesson.subject, slot.day))
                         .or_default()
@@ -268,6 +340,18 @@ pub fn verify(doc: &TimetableDoc) -> Report {
             }
             if let Some(room) = placement.room {
                 if doc.rooms.contains_key(&room) {
+                    if doc
+                        .hard_limits
+                        .room_blocked_slots
+                        .get(&room)
+                        .is_some_and(|mask| mask & (1u64 << bit) != 0)
+                    {
+                        violations.push(Violation::RoomUnavailable {
+                            card: key,
+                            room,
+                            slot,
+                        });
+                    }
                     rooms.entry((room, slot)).or_default().push(key);
                 }
             }
@@ -571,6 +655,84 @@ mod tests {
             day: 1,
             actual: 2,
             limit: 1
+        }));
+    }
+    #[test]
+    fn double_respects_availability_and_start_end_restrictions() {
+        let mut d = TimetableDoc::default();
+        d.subjects.insert(
+            SubjectId(1),
+            Subject {
+                id: SubjectId(1),
+                name: "S".into(),
+            },
+        );
+        d.classes.insert(
+            ClassId(1),
+            Class {
+                id: ClassId(1),
+                name: "C".into(),
+                size: 20,
+            },
+        );
+        d.rooms.insert(
+            RoomId(1),
+            Room {
+                id: RoomId(1),
+                name: "R".into(),
+                capacity: 30,
+            },
+        );
+        d.lessons.insert(
+            LessonId(1),
+            Lesson {
+                id: LessonId(1),
+                subject: SubjectId(1),
+                teachers: vec![],
+                classes: vec![ClassId(1)],
+                class_scopes: BTreeMap::new(),
+                duration: 2,
+                occurrences: 1,
+            },
+        );
+        d.hard_limits.class_blocked_slots.insert(ClassId(1), 1 << 1);
+        d.hard_limits.room_blocked_slots.insert(RoomId(1), 1 << 1);
+        d.hard_limits
+            .lesson_allowed_starts
+            .insert(LessonId(1), 1 << 2);
+        d.hard_limits.subject_banned_starts.insert(SubjectId(1), 1);
+        d.hard_limits
+            .subject_banned_ends
+            .insert(SubjectId(1), 1 << 1);
+        d.hard_limits
+            .lesson_allowed_rooms
+            .insert(LessonId(1), [RoomId(2)].into_iter().collect());
+        Arc::make_mut(&mut d.placements).insert(
+            CardId(1),
+            Placement {
+                card: CardId(1),
+                lesson: LessonId(1),
+                start: TimeSlot { day: 0, period: 0 },
+                room: Some(RoomId(1)),
+            },
+        );
+        let v = verify(&d).violations;
+        assert!(v.contains(&Violation::LessonStartNotAllowed { card: CardId(1) }));
+        assert!(v.contains(&Violation::SubjectStartBanned { card: CardId(1) }));
+        assert!(v.contains(&Violation::SubjectEndBanned { card: CardId(1) }));
+        assert!(v.contains(&Violation::RoomNotAllowed {
+            card: CardId(1),
+            room: Some(RoomId(1))
+        }));
+        assert!(v.contains(&Violation::ClassUnavailable {
+            card: CardId(1),
+            class: ClassId(1),
+            slot: TimeSlot { day: 0, period: 1 }
+        }));
+        assert!(v.contains(&Violation::RoomUnavailable {
+            card: CardId(1),
+            room: RoomId(1),
+            slot: TimeSlot { day: 0, period: 1 }
         }));
     }
 }

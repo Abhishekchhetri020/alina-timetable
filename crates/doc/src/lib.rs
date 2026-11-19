@@ -68,6 +68,21 @@ pub struct HardLimits {
     /// Bit per allowed day. Missing entries permit every day.
     pub lesson_allowed_days: BTreeMap<LessonId, u64>,
     pub lesson_fixed_start: BTreeMap<LessonId, TimeSlot>,
+    /// Absolute weekly slot masks: set means unavailable.
+    #[serde(default)]
+    pub class_blocked_slots: BTreeMap<ClassId, u64>,
+    #[serde(default)]
+    pub room_blocked_slots: BTreeMap<RoomId, u64>,
+    /// Period-of-day masks (bit zero is the first period).
+    #[serde(default)]
+    pub lesson_allowed_starts: BTreeMap<LessonId, u64>,
+    #[serde(default)]
+    pub subject_banned_starts: BTreeMap<SubjectId, u64>,
+    #[serde(default)]
+    pub subject_banned_ends: BTreeMap<SubjectId, u64>,
+    /// Only listed rooms are allowed for this lesson; an empty list permits none.
+    #[serde(default)]
+    pub lesson_allowed_rooms: BTreeMap<LessonId, BTreeSet<RoomId>>,
 }
 /// Bootstrap schema, not yet a stable interchange format.
 #[derive(Clone, Debug, Serialize, Deserialize)]
