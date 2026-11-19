@@ -1,13 +1,18 @@
 #![deny(clippy::unwrap_used)]
 //! Independent deterministic checks for the supported document subset.
 //! This is not yet a complete Chronexa constraint oracle.
-use alina_doc::{ClassScope, Placement, TimetableDoc};
+use alina_doc::{CardRelationKind, ClassScope, Placement, TimetableDoc};
 use alina_foundation::{CardId, ClassId, RoomId, TeacherId, TimeSlot};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Violation {
     InvalidWeek,
+    CardRelation {
+        index: usize,
+        a: CardId,
+        b: CardId,
+    },
     InvalidAvailability {
         teacher: TeacherId,
     },
@@ -275,19 +280,23 @@ pub fn verify(doc: &TimetableDoc) -> Report {
             .classes
             .iter()
             .any(|c| matches!(lesson.class_scopes.get(c), Some(ClassScope::Groups { .. })));
-        if has_groups && placement.room.is_some() {
+        let required_size = lesson.student_count.map_or(size, u64::from);
+        if has_groups && lesson.student_count.is_none() && placement.room.is_some() {
             violations.push(Violation::GroupCapacityUnknown { card: key });
         }
         if let Some(room) = placement.room {
             match doc.rooms.get(&room) {
                 None => violations.push(Violation::MissingRoom { card: key, room }),
-                Some(r) if !has_groups && size > u64::from(r.capacity) => {
+                Some(r)
+                    if (!has_groups || lesson.student_count.is_some())
+                        && required_size > u64::from(r.capacity) =>
+                {
                     violations.push(Violation::RoomCapacity {
                         card: key,
                         room,
-                        required: size,
+                        required: required_size,
                         capacity: r.capacity,
-                    })
+                    });
                 }
                 _ => {}
             }
@@ -355,6 +364,39 @@ pub fn verify(doc: &TimetableDoc) -> Report {
                     rooms.entry((room, slot)).or_default().push(key);
                 }
             }
+        }
+    }
+    for (index, relation) in doc.hard_limits.card_relations.iter().enumerate() {
+        let (Some(a), Some(b)) = (
+            doc.placements.get(&relation.a),
+            doc.placements.get(&relation.b),
+        ) else {
+            continue;
+        };
+        let (Some(al), Some(bl)) = (doc.lessons.get(&a.lesson), doc.lessons.get(&b.lesson)) else {
+            continue;
+        };
+        let a_end = u16::from(a.start.period) + u16::from(al.duration);
+        let b_end = u16::from(b.start.period) + u16::from(bl.duration);
+        let same_day = a.start.day == b.start.day;
+        let bad = match relation.kind {
+            CardRelationKind::DifferentDays => same_day,
+            CardRelationKind::NoOverlap => {
+                same_day && u16::from(a.start.period) < b_end && u16::from(b.start.period) < a_end
+            }
+            CardRelationKind::NotAdjacent => {
+                same_day
+                    && (a_end == u16::from(b.start.period) || b_end == u16::from(a.start.period))
+            }
+            CardRelationKind::SameDay => !same_day,
+            CardRelationKind::SameStart => a.start != b.start,
+        };
+        if bad {
+            violations.push(Violation::CardRelation {
+                index,
+                a: relation.a,
+                b: relation.b,
+            });
         }
     }
     let mut teacher_days: BTreeMap<(TeacherId, u8), usize> = BTreeMap::new();
@@ -492,6 +534,7 @@ mod tests {
                     teachers: vec![TeacherId(1)],
                     classes: vec![ClassId(1)],
                     class_scopes: BTreeMap::new(),
+                    student_count: None,
                     duration: if n == 1 { 2 } else { 1 },
                     occurrences: 1,
                 },
@@ -537,6 +580,7 @@ mod tests {
                 teachers: vec![],
                 classes: vec![],
                 class_scopes: BTreeMap::new(),
+                student_count: None,
                 duration: 2,
                 occurrences: 1,
             },
@@ -610,6 +654,7 @@ mod tests {
                 teachers: vec![TeacherId(1)],
                 classes: vec![ClassId(1)],
                 class_scopes: BTreeMap::new(),
+                student_count: None,
                 duration: 2,
                 occurrences: 1,
             },
@@ -691,6 +736,7 @@ mod tests {
                 teachers: vec![],
                 classes: vec![ClassId(1)],
                 class_scopes: BTreeMap::new(),
+                student_count: None,
                 duration: 2,
                 occurrences: 1,
             },
@@ -733,6 +779,148 @@ mod tests {
             card: CardId(1),
             room: RoomId(1),
             slot: TimeSlot { day: 0, period: 1 }
+        }));
+    }
+    #[test]
+    fn pair_relations_use_complete_spans_and_ignore_unplaced_partner() {
+        use alina_doc::{CardRelation, CardRelationKind};
+        let mut d = TimetableDoc::default();
+        d.subjects.insert(
+            SubjectId(1),
+            Subject {
+                id: SubjectId(1),
+                name: "S".into(),
+            },
+        );
+        d.lessons.insert(
+            LessonId(1),
+            Lesson {
+                id: LessonId(1),
+                subject: SubjectId(1),
+                teachers: vec![],
+                classes: vec![],
+                class_scopes: BTreeMap::new(),
+                student_count: None,
+                duration: 2,
+                occurrences: 2,
+            },
+        );
+        let put = |d: &mut TimetableDoc, id, day, period| {
+            Arc::make_mut(&mut d.placements).insert(
+                CardId(id),
+                Placement {
+                    card: CardId(id),
+                    lesson: LessonId(1),
+                    start: TimeSlot { day, period },
+                    room: None,
+                },
+            );
+        };
+        d.hard_limits.card_relations.push(CardRelation {
+            a: CardId(1),
+            b: CardId(2),
+            kind: CardRelationKind::NoOverlap,
+        });
+        put(&mut d, 1, 0, 0);
+        assert!(verify(&d).violations.is_empty());
+        put(&mut d, 2, 0, 1);
+        assert!(verify(&d).violations.contains(&Violation::CardRelation {
+            index: 0,
+            a: CardId(1),
+            b: CardId(2)
+        }));
+        d.hard_limits.card_relations[0].kind = CardRelationKind::NotAdjacent;
+        put(&mut d, 2, 0, 2);
+        assert!(verify(&d).violations.contains(&Violation::CardRelation {
+            index: 0,
+            a: CardId(1),
+            b: CardId(2)
+        }));
+        d.hard_limits.card_relations[0].kind = CardRelationKind::SameStart;
+        assert!(verify(&d).violations.contains(&Violation::CardRelation {
+            index: 0,
+            a: CardId(1),
+            b: CardId(2)
+        }));
+        put(&mut d, 2, 0, 0);
+        assert!(verify(&d).violations.is_empty());
+        d.hard_limits.card_relations[0].kind = CardRelationKind::DifferentDays;
+        assert!(!verify(&d).violations.is_empty());
+        d.hard_limits.card_relations[0].kind = CardRelationKind::SameDay;
+        put(&mut d, 2, 1, 0);
+        assert!(!verify(&d).violations.is_empty());
+    }
+    #[test]
+    fn split_group_capacity_requires_known_size() {
+        let mut d = TimetableDoc::default();
+        d.subjects.insert(
+            SubjectId(1),
+            Subject {
+                id: SubjectId(1),
+                name: "S".into(),
+            },
+        );
+        d.classes.insert(
+            ClassId(1),
+            Class {
+                id: ClassId(1),
+                name: "C".into(),
+                size: 40,
+            },
+        );
+        d.rooms.insert(
+            RoomId(1),
+            Room {
+                id: RoomId(1),
+                name: "R".into(),
+                capacity: 20,
+            },
+        );
+        let mut scopes = BTreeMap::new();
+        scopes.insert(
+            ClassId(1),
+            ClassScope::Groups {
+                division: 1,
+                groups: [1].into_iter().collect(),
+            },
+        );
+        d.lessons.insert(
+            LessonId(1),
+            Lesson {
+                id: LessonId(1),
+                subject: SubjectId(1),
+                teachers: vec![],
+                classes: vec![ClassId(1)],
+                class_scopes: scopes,
+                student_count: None,
+                duration: 1,
+                occurrences: 1,
+            },
+        );
+        Arc::make_mut(&mut d.placements).insert(
+            CardId(1),
+            Placement {
+                card: CardId(1),
+                lesson: LessonId(1),
+                start: TimeSlot { day: 0, period: 0 },
+                room: Some(RoomId(1)),
+            },
+        );
+        assert!(verify(&d)
+            .violations
+            .contains(&Violation::GroupCapacityUnknown { card: CardId(1) }));
+        if let Some(l) = d.lessons.get_mut(&LessonId(1)) {
+            l.student_count = Some(15)
+        }
+        assert!(verify(&d).violations.is_empty());
+        if let Some(l) = d.lessons.get_mut(&LessonId(1)) {
+            l.student_count = Some(21)
+        }
+        assert!(verify(&d).violations.contains(&Violation::RoomCapacity {
+            card: CardId(1),
+            room: RoomId(1),
+            required: 21,
+            capacity: 20
         }));
     }
 }

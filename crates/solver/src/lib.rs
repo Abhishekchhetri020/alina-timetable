@@ -244,6 +244,7 @@ mod tests {
                 teachers: vec![TeacherId(1)],
                 classes: vec![ClassId(1)],
                 class_scopes: BTreeMap::new(),
+                student_count: None,
                 duration: 1,
                 occurrences: 3,
             },

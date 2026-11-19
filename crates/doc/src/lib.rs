@@ -49,6 +49,9 @@ pub struct Lesson {
     /// Missing entries mean the whole class. Group capacity is not yet modeled.
     #[serde(default)]
     pub class_scopes: BTreeMap<ClassId, ClassScope>,
+    /// Explicit participant count for split or merged groups, if known.
+    #[serde(default)]
+    pub student_count: Option<u32>,
     pub duration: u8,
     pub occurrences: u16,
 }
@@ -58,6 +61,21 @@ pub struct Placement {
     pub lesson: LessonId,
     pub start: TimeSlot,
     pub room: Option<RoomId>,
+}
+/// Pairwise hard constraints on individual card occurrences.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CardRelationKind {
+    DifferentDays,
+    NoOverlap,
+    NotAdjacent,
+    SameDay,
+    SameStart,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardRelation {
+    pub a: CardId,
+    pub b: CardId,
+    pub kind: CardRelationKind,
 }
 /// Optional hard limits. Absence means unrestricted.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -83,6 +101,8 @@ pub struct HardLimits {
     /// Only listed rooms are allowed for this lesson; an empty list permits none.
     #[serde(default)]
     pub lesson_allowed_rooms: BTreeMap<LessonId, BTreeSet<RoomId>>,
+    #[serde(default)]
+    pub card_relations: Vec<CardRelation>,
 }
 /// Bootstrap schema, not yet a stable interchange format.
 #[derive(Clone, Debug, Serialize, Deserialize)]
