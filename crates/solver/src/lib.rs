@@ -190,7 +190,12 @@ fn span_mask(doc: &TimetableDoc, start: TimeSlot, duration: u8) -> u64 {
     mask
 }
 impl Search<'_> {
-    fn candidates(&self, r: &CardRequest, occupancy: &Occupancy) -> Vec<Placement> {
+    fn candidates(
+        &self,
+        r: &CardRequest,
+        occupancy: &Occupancy,
+        cutoff: Option<usize>,
+    ) -> Vec<Placement> {
         let rooms: Vec<Option<RoomId>> = if r.rooms.is_empty() {
             vec![None]
         } else {
@@ -232,6 +237,12 @@ impl Search<'_> {
                         .is_empty()
                     {
                         candidates.push(candidate);
+                        // For MRV only a strictly smaller domain can replace
+                        // the current choice. Equal-sized domains retain the
+                        // earlier card's deterministic tie-break.
+                        if cutoff.is_some_and(|limit| candidates.len() >= limit) {
+                            return candidates;
+                        }
                     }
                 }
             }
@@ -255,10 +266,13 @@ impl Search<'_> {
         let occupancy = Occupancy::from_doc(&self.doc);
         for id in remaining {
             if let Some(r) = self.requests.iter().find(|r| r.card == *id) {
-                let c = self.candidates(r, &occupancy);
+                let c = self.candidates(r, &occupancy, choice.map(|_| options.len()));
                 if choice.is_none() || c.len() < options.len() {
                     choice = Some(*id);
                     options = c;
+                    if options.is_empty() {
+                        break;
+                    }
                 }
             }
         }
@@ -445,5 +459,30 @@ mod tests {
                 room: None
             }
         ));
+    }
+    #[test]
+    fn mrv_cutoff_preserves_prefix_and_detects_smaller_domains() {
+        let doc = fixture();
+        let request = CardRequest {
+            card: CardId(1),
+            lesson: LessonId(1),
+            rooms: vec![],
+        };
+        let search = Search {
+            doc: doc.clone(),
+            requests: std::slice::from_ref(&request),
+            budget: 10,
+            nodes: 0,
+            best: vec![],
+            current: vec![],
+            limited: false,
+        };
+        let occupancy = Occupancy::from_doc(&doc);
+        let all = search.candidates(&request, &occupancy, None);
+        let cutoff = search.candidates(&request, &occupancy, Some(1));
+        assert_eq!(all.len(), 2);
+        assert_eq!(cutoff.len(), 1);
+        assert_eq!(format!("{:?}", cutoff[0]), format!("{:?}", all[0]));
+        assert_eq!(search.candidates(&request, &occupancy, Some(3)).len(), 2);
     }
 }
