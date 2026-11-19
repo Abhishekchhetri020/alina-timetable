@@ -232,7 +232,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
     )?;
     reject_fields(
         &root,
-        &["relations", "cards", "groups", "divisions", "globals"],
+        &["relations", "groups", "divisions", "globals"],
         "school",
     )?;
     let days =
@@ -467,6 +467,37 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         );
     }
     let mut cards = BTreeMap::new();
+    let mut locked_by_lesson: BTreeMap<String, Vec<(u8, u8)>> = BTreeMap::new();
+    if let Some(value) = root.get("cards") {
+        let entries = value
+            .as_array()
+            .ok_or_else(|| err("cards must be an array"))?;
+        for card in entries {
+            allowed_fields(card, &["id", "lessonId", "day", "period", "locked"], "card")?;
+            let lesson = string(card, "lessonId")?;
+            if !li.contains_key(lesson) {
+                return Err(err(format!("unknown card lesson {lesson}")));
+            }
+            match card.get("locked") {
+                Some(Value::Bool(true)) => {
+                    let day = number(card, "day", u64::MAX)?;
+                    let period = number(card, "period", 0)?;
+                    if day >= u64::from(days) || period == 0 || period > u64::from(periods) {
+                        return Err(err("locked card outside week"));
+                    }
+                    locked_by_lesson
+                        .entry(lesson.to_owned())
+                        .or_default()
+                        .push((day as u8, (period - 1) as u8));
+                }
+                None | Some(Value::Bool(false)) => {}
+                _ => return Err(err("invalid card locked")),
+            }
+        }
+        for values in locked_by_lesson.values_mut() {
+            values.sort();
+        }
+    }
     let mut requests = Vec::new();
     let mut next = 1u64;
     let mut sorted = lessons.iter().collect::<Vec<_>>();
@@ -615,6 +646,16 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             }
             _ => return Err(err("fixedDay and fixedPeriod must be specified together")),
         }
+        if let Some(locked) = locked_by_lesson.get(source) {
+            if locked.len() > occurrence_ids.len() {
+                return Err(err(format!("too many locked cards for lesson {source}")));
+            }
+            for (index, &(day, period)) in locked.iter().enumerate() {
+                doc.hard_limits
+                    .card_fixed_start
+                    .insert(occurrence_ids[index], TimeSlot { day, period });
+            }
+        }
         cards.insert(source.to_owned(), occurrence_ids);
     }
     Ok(ChronexaImport {
@@ -749,6 +790,26 @@ mod tests {
         assert_eq!(
             imported.document.hard_limits.card_fixed_start[&CardId(1)],
             TimeSlot { day: 0, period: 1 }
+        );
+        Ok(())
+    }
+    #[test]
+    fn locked_cards_override_anchor_and_sort_by_slot() -> Result<(), ImportError> {
+        let mut v = input();
+        v["lessons"][0]["fixedDay"] = json!(0);
+        v["lessons"][0]["fixedPeriod"] = json!(1);
+        v["cards"] = json!([
+            {"id":"b", "lessonId":"l", "day":1, "period":2, "locked":true},
+            {"id":"a", "lessonId":"l", "day":0, "period":3, "locked":true}
+        ]);
+        let imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(
+            imported.document.hard_limits.card_fixed_start[&CardId(1)],
+            TimeSlot { day: 0, period: 2 }
+        );
+        assert_eq!(
+            imported.document.hard_limits.card_fixed_start[&CardId(2)],
+            TimeSlot { day: 1, period: 1 }
         );
         Ok(())
     }
