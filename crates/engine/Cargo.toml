@@ -6,5 +6,7 @@ license.workspace = true
 
 [dependencies]
 alina-doc.workspace = true
+alina-foundation.workspace = true
+alina-oracle = { path = "../oracle" }
 serde.workspace = true
 serde_json.workspace = true

@@ -126,6 +126,63 @@ pub struct Report {
     pub violations: Vec<Violation>,
 }
 
+/// Unweighted quality indicators. These are separate from hard violations;
+/// applications may choose their own weights without changing feasibility.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SoftIndicators {
+    pub teacher_gap_periods: usize,
+    pub teacher_undesirable_periods: usize,
+}
+
+/// Count teacher windows and occupied undesirable slots deterministically.
+/// Only valid, in-bounds lesson spans contribute to the indicators.
+pub fn soft_indicators(doc: &TimetableDoc) -> SoftIndicators {
+    use std::collections::BTreeSet;
+    let mut occupied: BTreeMap<(TeacherId, u8), BTreeSet<u8>> = BTreeMap::new();
+    if doc.days == 0
+        || doc.periods_per_day == 0
+        || u16::from(doc.days) * u16::from(doc.periods_per_day) > 64
+    {
+        return SoftIndicators::default();
+    }
+    for placement in doc.placements.values() {
+        let Some(lesson) = doc.lessons.get(&placement.lesson) else {
+            continue;
+        };
+        let end = u16::from(placement.start.period) + u16::from(lesson.duration);
+        if lesson.duration == 0
+            || placement.start.day >= doc.days
+            || end > u16::from(doc.periods_per_day)
+        {
+            continue;
+        }
+        for teacher in &lesson.teachers {
+            if doc.teachers.contains_key(teacher) {
+                for period in placement.start.period..end as u8 {
+                    occupied
+                        .entry((*teacher, placement.start.day))
+                        .or_default()
+                        .insert(period);
+                }
+            }
+        }
+    }
+    let mut result = SoftIndicators::default();
+    for ((teacher, day), periods) in occupied {
+        if let (Some(first), Some(last)) = (periods.first(), periods.last()) {
+            result.teacher_gap_periods += usize::from(last - first) + 1 - periods.len();
+        }
+        if let Some(data) = doc.teachers.get(&teacher) {
+            for period in periods {
+                let bit = u32::from(day) * u32::from(doc.periods_per_day) + u32::from(period);
+                result.teacher_undesirable_periods +=
+                    usize::from(data.availability.undesirable & (1u64 << bit) != 0);
+            }
+        }
+    }
+    result
+}
+
 fn scopes_conflict(a: &ClassScope, b: &ClassScope) -> bool {
     match (a, b) {
         (
@@ -390,6 +447,12 @@ pub fn verify(doc: &TimetableDoc) -> Report {
             }
             CardRelationKind::SameDay => !same_day,
             CardRelationKind::SameStart => a.start != b.start,
+            CardRelationKind::Adjacent => {
+                !same_day
+                    || (a_end != u16::from(b.start.period) && b_end != u16::from(a.start.period))
+            }
+            CardRelationKind::OrderedAdjacent => !same_day || a_end != u16::from(b.start.period),
+            CardRelationKind::SameDayOrdered => !same_day || a_end > u16::from(b.start.period),
         };
         if bad {
             violations.push(Violation::CardRelation {
@@ -488,6 +551,52 @@ mod tests {
     use alina_doc::{Class, Lesson, Placement, Room, Subject, Teacher};
     use alina_foundation::{Availability, LessonId, SubjectId};
     use std::sync::Arc;
+    #[test]
+    fn soft_indicators_count_occupied_periods_and_gaps() {
+        let mut d = TimetableDoc::default();
+        d.teachers.insert(
+            TeacherId(1),
+            Teacher {
+                id: TeacherId(1),
+                name: "T".into(),
+                availability: alina_foundation::Availability {
+                    blocked: 0,
+                    undesirable: 1 << 3,
+                },
+            },
+        );
+        d.lessons.insert(
+            LessonId(1),
+            Lesson {
+                id: LessonId(1),
+                subject: SubjectId(1),
+                teachers: vec![TeacherId(1)],
+                classes: vec![],
+                class_scopes: BTreeMap::new(),
+                student_count: None,
+                duration: 1,
+                occurrences: 2,
+            },
+        );
+        for (id, period) in [(1, 0), (2, 3)] {
+            Arc::make_mut(&mut d.placements).insert(
+                CardId(id),
+                Placement {
+                    card: CardId(id),
+                    lesson: LessonId(1),
+                    start: TimeSlot { day: 0, period },
+                    room: None,
+                },
+            );
+        }
+        assert_eq!(
+            soft_indicators(&d),
+            SoftIndicators {
+                teacher_gap_periods: 2,
+                teacher_undesirable_periods: 1
+            }
+        );
+    }
     #[test]
     fn detects_clashes_in_second_period_and_capacity() {
         let mut d = TimetableDoc::default();
@@ -849,6 +958,19 @@ mod tests {
         d.hard_limits.card_relations[0].kind = CardRelationKind::SameDay;
         put(&mut d, 2, 1, 0);
         assert!(!verify(&d).violations.is_empty());
+        d.hard_limits.card_relations[0].kind = CardRelationKind::OrderedAdjacent;
+        put(&mut d, 2, 0, 2);
+        assert!(verify(&d).violations.is_empty());
+        put(&mut d, 2, 0, 3);
+        assert!(!verify(&d).violations.is_empty());
+        d.hard_limits.card_relations[0].kind = CardRelationKind::SameDayOrdered;
+        assert!(verify(&d).violations.is_empty());
+        put(&mut d, 2, 0, 1);
+        assert!(!verify(&d).violations.is_empty());
+        d.hard_limits.card_relations[0].kind = CardRelationKind::Adjacent;
+        put(&mut d, 1, 0, 2);
+        put(&mut d, 2, 0, 0);
+        assert!(verify(&d).violations.is_empty());
     }
     #[test]
     fn split_group_capacity_requires_known_size() {

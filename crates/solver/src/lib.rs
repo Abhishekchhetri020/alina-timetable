@@ -32,6 +32,7 @@ pub enum SolveError {
     DuplicateCard(CardId),
     MissingLesson(LessonId),
     OccurrenceOverflow(LessonId),
+    UnknownRelationCard(CardId),
     InvalidBudget,
 }
 
@@ -56,6 +57,15 @@ pub fn solve(
         }
         if !base.lessons.contains_key(&request.lesson) {
             return Err(SolveError::MissingLesson(request.lesson));
+        }
+    }
+    // A relation cannot be enforced if either endpoint is outside the solve.
+    // Reject it instead of reporting a falsely complete solution.
+    for relation in &base.hard_limits.card_relations {
+        for card in [relation.a, relation.b] {
+            if !ids.contains(&card) && !base.placements.contains_key(&card) {
+                return Err(SolveError::UnknownRelationCard(card));
+            }
         }
     }
     // Enforce the lesson occurrence count across fixed and requested cards.
@@ -297,5 +307,24 @@ mod tests {
         }];
         assert_eq!(solve(&d, &req, 1)?.status, Status::BudgetReached);
         Ok(())
+    }
+    #[test]
+    fn missing_relation_endpoint_is_rejected() {
+        use alina_doc::{CardRelation, CardRelationKind};
+        let mut doc = fixture();
+        doc.hard_limits.card_relations.push(CardRelation {
+            a: CardId(1),
+            b: CardId(2),
+            kind: CardRelationKind::SameDay,
+        });
+        let requests = [CardRequest {
+            card: CardId(1),
+            lesson: LessonId(1),
+            rooms: vec![],
+        }];
+        assert!(matches!(
+            solve(&doc, &requests, 100),
+            Err(SolveError::UnknownRelationCard(CardId(2)))
+        ));
     }
 }

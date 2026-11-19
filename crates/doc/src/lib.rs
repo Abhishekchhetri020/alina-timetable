@@ -70,6 +70,12 @@ pub enum CardRelationKind {
     NotAdjacent,
     SameDay,
     SameStart,
+    /// Either card immediately follows the other, accounting for duration.
+    Adjacent,
+    /// Card a immediately precedes card b.
+    OrderedAdjacent,
+    /// Card a finishes before card b starts on the same day.
+    SameDayOrdered,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardRelation {
