@@ -467,13 +467,27 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         );
     }
     let mut cards = BTreeMap::new();
-    let mut locked_by_lesson: BTreeMap<String, Vec<(u8, u8)>> = BTreeMap::new();
+    type LockedOccurrence = (u8, u8, Option<Option<RoomId>>);
+    let mut locked_by_lesson: BTreeMap<String, Vec<LockedOccurrence>> = BTreeMap::new();
     if let Some(value) = root.get("cards") {
         let entries = value
             .as_array()
             .ok_or_else(|| err("cards must be an array"))?;
         for card in entries {
-            allowed_fields(card, &["id", "lessonId", "day", "period", "locked"], "card")?;
+            allowed_fields(
+                card,
+                &[
+                    "id",
+                    "lessonId",
+                    "day",
+                    "period",
+                    "locked",
+                    "roomId",
+                    "classroomId",
+                    "_mppLockRoom",
+                ],
+                "card",
+            )?;
             let lesson = string(card, "lessonId")?;
             if !li.contains_key(lesson) {
                 return Err(err(format!("unknown card lesson {lesson}")));
@@ -485,17 +499,36 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
                     if day >= u64::from(days) || period == 0 || period > u64::from(periods) {
                         return Err(err("locked card outside week"));
                     }
+                    let fixed_room = match card.get("_mppLockRoom") {
+                        None | Some(Value::Bool(false)) => None,
+                        Some(Value::Bool(true)) => {
+                            let room = card
+                                .get("classroomId")
+                                .filter(|v| !v.is_null())
+                                .or_else(|| card.get("roomId"));
+                            Some(match room {
+                                None | Some(Value::Null) => None,
+                                Some(Value::String(id)) if id.is_empty() => None,
+                                Some(Value::String(id)) => Some(RoomId(
+                                    *ri.get(id)
+                                        .ok_or_else(|| err(format!("unknown locked room {id}")))?,
+                                )),
+                                _ => return Err(err("invalid locked room")),
+                            })
+                        }
+                        _ => return Err(err("invalid room lock flag")),
+                    };
                     locked_by_lesson
                         .entry(lesson.to_owned())
                         .or_default()
-                        .push((day as u8, (period - 1) as u8));
+                        .push((day as u8, (period - 1) as u8, fixed_room));
                 }
                 None | Some(Value::Bool(false)) => {}
                 _ => return Err(err("invalid card locked")),
             }
         }
         for values in locked_by_lesson.values_mut() {
-            values.sort();
+            values.sort_by_key(|(day, period, _)| (*day, *period));
         }
     }
     let mut requests = Vec::new();
@@ -650,10 +683,15 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             if locked.len() > occurrence_ids.len() {
                 return Err(err(format!("too many locked cards for lesson {source}")));
             }
-            for (index, &(day, period)) in locked.iter().enumerate() {
+            for (index, &(day, period, room)) in locked.iter().enumerate() {
                 doc.hard_limits
                     .card_fixed_start
                     .insert(occurrence_ids[index], TimeSlot { day, period });
+                if let Some(room) = room {
+                    doc.hard_limits
+                        .card_fixed_room
+                        .insert(occurrence_ids[index], room);
+                }
             }
         }
         cards.insert(source.to_owned(), occurrence_ids);
@@ -794,13 +832,31 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn locked_room_precedence_and_equal_slot_order_are_preserved() -> Result<(), ImportError> {
+        let mut v = input();
+        v["cards"] = json!([
+            {"id":"first", "lessonId":"l", "day":0, "period":1, "locked":true, "_mppLockRoom":true},
+            {"id":"second", "lessonId":"l", "day":0, "period":1, "locked":true, "_mppLockRoom":true, "classroomId":"r", "roomId":"missing"}
+        ]);
+        let imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(
+            imported.document.hard_limits.card_fixed_room[&CardId(1)],
+            None
+        );
+        assert_eq!(
+            imported.document.hard_limits.card_fixed_room[&CardId(2)],
+            Some(RoomId(1))
+        );
+        Ok(())
+    }
+    #[test]
     fn locked_cards_override_anchor_and_sort_by_slot() -> Result<(), ImportError> {
         let mut v = input();
         v["lessons"][0]["fixedDay"] = json!(0);
         v["lessons"][0]["fixedPeriod"] = json!(1);
         v["cards"] = json!([
             {"id":"b", "lessonId":"l", "day":1, "period":2, "locked":true},
-            {"id":"a", "lessonId":"l", "day":0, "period":3, "locked":true}
+            {"id":"a", "lessonId":"l", "day":0, "period":3, "locked":true, "_mppLockRoom":true, "classroomId":"r"}
         ]);
         let imported = import_chronexa_json(&v.to_string())?;
         assert_eq!(
@@ -810,6 +866,10 @@ mod tests {
         assert_eq!(
             imported.document.hard_limits.card_fixed_start[&CardId(2)],
             TimeSlot { day: 1, period: 1 }
+        );
+        assert_eq!(
+            imported.document.hard_limits.card_fixed_room[&CardId(1)],
+            Some(RoomId(1))
         );
         Ok(())
     }

@@ -38,6 +38,9 @@ pub enum Violation {
         card: CardId,
         room: Option<RoomId>,
     },
+    FixedRoomMismatch {
+        card: CardId,
+    },
     ClassUnavailable {
         card: CardId,
         class: ClassId,
@@ -478,6 +481,14 @@ pub fn verify(doc: &TimetableDoc) -> Report {
                 room: placement.room,
             });
         }
+        if doc
+            .hard_limits
+            .card_fixed_room
+            .get(&key)
+            .is_some_and(|room| *room != placement.room)
+        {
+            violations.push(Violation::FixedRoomMismatch { card: key });
+        }
         let mut size = 0u64;
         for class in &lesson.classes {
             match doc.classes.get(class) {
@@ -742,6 +753,61 @@ mod tests {
     use alina_doc::{Class, Lesson, Placement, Room, Subject, Teacher};
     use alina_foundation::{Availability, LessonId, SubjectId};
     use std::sync::Arc;
+    #[test]
+    fn fixed_room_is_checked_for_room_and_no_room() {
+        let mut d = TimetableDoc::default();
+        d.subjects.insert(
+            SubjectId(1),
+            Subject {
+                id: SubjectId(1),
+                name: "S".into(),
+            },
+        );
+        d.lessons.insert(
+            LessonId(1),
+            Lesson {
+                id: LessonId(1),
+                subject: SubjectId(1),
+                teachers: vec![],
+                classes: vec![],
+                class_scopes: BTreeMap::new(),
+                student_count: None,
+                duration: 1,
+                occurrences: 1,
+            },
+        );
+        d.rooms.insert(
+            RoomId(1),
+            Room {
+                id: RoomId(1),
+                name: "R".into(),
+                capacity: 30,
+            },
+        );
+        let placement = Placement {
+            card: CardId(1),
+            lesson: LessonId(1),
+            start: TimeSlot { day: 0, period: 0 },
+            room: Some(RoomId(1)),
+        };
+        Arc::make_mut(&mut d.placements).insert(CardId(1), placement);
+        d.hard_limits.card_fixed_room.insert(CardId(1), None);
+        assert!(verify(&d)
+            .violations
+            .contains(&Violation::FixedRoomMismatch { card: CardId(1) }));
+        d.hard_limits
+            .card_fixed_room
+            .insert(CardId(1), Some(RoomId(1)));
+        assert!(!verify(&d)
+            .violations
+            .contains(&Violation::FixedRoomMismatch { card: CardId(1) }));
+        if let Some(p) = Arc::make_mut(&mut d.placements).get_mut(&CardId(1)) {
+            p.room = None;
+        }
+        assert!(verify(&d)
+            .violations
+            .contains(&Violation::FixedRoomMismatch { card: CardId(1) }));
+    }
     #[test]
     fn soft_indicators_count_occupied_periods_and_gaps() {
         let mut d = TimetableDoc::default();

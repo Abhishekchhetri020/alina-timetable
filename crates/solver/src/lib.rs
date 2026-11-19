@@ -196,14 +196,18 @@ impl Search<'_> {
         occupancy: &Occupancy,
         cutoff: Option<usize>,
     ) -> Vec<Placement> {
-        let rooms: Vec<Option<RoomId>> = if r.rooms.is_empty() {
-            vec![None]
-        } else {
-            let mut x = r.rooms.clone();
-            x.sort();
-            x.dedup();
-            x.into_iter().map(Some).collect()
-        };
+        // Chronexa treats a locked room as an override of ordinary room choices.
+        let rooms: Vec<Option<RoomId>> =
+            if let Some(room) = self.doc.hard_limits.card_fixed_room.get(&r.card) {
+                vec![*room]
+            } else if r.rooms.is_empty() {
+                vec![None]
+            } else {
+                let mut x = r.rooms.clone();
+                x.sort();
+                x.dedup();
+                x.into_iter().map(Some).collect()
+            };
         let mut candidates = Vec::new();
         for d in 0..self.doc.days {
             for p in 0..self.doc.periods_per_day {
@@ -378,6 +382,41 @@ mod tests {
         let r = solve(&d, &req, 1000)?;
         assert_eq!(r.status, Status::Exhausted);
         assert_eq!(r.unplaced.len(), 1);
+        Ok(())
+    }
+    #[test]
+    fn locked_room_overrides_requested_rooms_including_no_room() -> Result<(), SolveError> {
+        use alina_doc::Room;
+        let mut d = fixture();
+        d.rooms.insert(
+            RoomId(1),
+            Room {
+                id: RoomId(1),
+                name: "A".into(),
+                capacity: 30,
+            },
+        );
+        d.rooms.insert(
+            RoomId(2),
+            Room {
+                id: RoomId(2),
+                name: "B".into(),
+                capacity: 30,
+            },
+        );
+        let request = [CardRequest {
+            card: CardId(1),
+            lesson: LessonId(1),
+            rooms: vec![RoomId(1)],
+        }];
+        d.hard_limits
+            .card_fixed_room
+            .insert(CardId(1), Some(RoomId(2)));
+        let result = solve(&d, &request, 100)?;
+        assert_eq!(result.placements[0].room, Some(RoomId(2)));
+        d.hard_limits.card_fixed_room.insert(CardId(1), None);
+        let result = solve(&d, &request, 100)?;
+        assert_eq!(result.placements[0].room, None);
         Ok(())
     }
     #[test]

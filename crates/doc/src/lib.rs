@@ -102,6 +102,9 @@ pub struct HardLimits {
     /// Fixed start of an individual occurrence, not every occurrence of a lesson.
     #[serde(default)]
     pub card_fixed_start: BTreeMap<CardId, TimeSlot>,
+    /// A present entry pins the room, including an explicit no-room choice.
+    #[serde(default)]
+    pub card_fixed_room: BTreeMap<CardId, Option<RoomId>>,
     /// Absolute weekly slot masks: set means unavailable.
     #[serde(default)]
     pub class_blocked_slots: BTreeMap<ClassId, u64>,
