@@ -92,6 +92,9 @@ pub struct HardLimits {
     /// Bit per allowed day. Missing entries permit every day.
     pub lesson_allowed_days: BTreeMap<LessonId, u64>,
     pub lesson_fixed_start: BTreeMap<LessonId, TimeSlot>,
+    /// Fixed start of an individual occurrence, not every occurrence of a lesson.
+    #[serde(default)]
+    pub card_fixed_start: BTreeMap<CardId, TimeSlot>,
     /// Absolute weekly slot masks: set means unavailable.
     #[serde(default)]
     pub class_blocked_slots: BTreeMap<ClassId, u64>,

@@ -2,7 +2,9 @@
 //! Explicit, conservative adapter for a subset of Chronexa's school JSON.
 //! Unsupported rule-bearing data is rejected rather than silently discarded.
 use alina_doc::{Class, Lesson, Room, Subject, Teacher, TimetableDoc};
-use alina_foundation::{Availability, CardId, ClassId, LessonId, RoomId, SubjectId, TeacherId};
+use alina_foundation::{
+    Availability, CardId, ClassId, LessonId, RoomId, SubjectId, TeacherId, TimeSlot,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -174,6 +176,31 @@ fn availability(v: Option<&Value>, days: u8, periods: u8) -> Result<Availability
     }
     Ok(result)
 }
+
+/// Return a period mask and whether the bell actually defined periods. An
+/// explicitly all-break bell is distinct from an absent/empty definition.
+fn bell_mask(bell: &Value, periods: u8) -> Result<(u64, bool), ImportError> {
+    let Some(entries) = bell.get("periods") else {
+        return Ok((0, false));
+    };
+    let entries = entries
+        .as_array()
+        .ok_or_else(|| err("bell.periods must be an array"))?;
+    let mut mask = 0u64;
+    let mut seen = BTreeSet::new();
+    for item in entries {
+        let index = number(item, "index", 0)?;
+        if index == 0 || index > u64::from(periods) || !seen.insert(index) {
+            return Err(err("invalid or duplicate bell period index"));
+        }
+        match item.get("isTeaching") {
+            None | Some(Value::Bool(true)) => mask |= 1u64 << (index - 1),
+            Some(Value::Bool(false)) => {}
+            _ => return Err(err("invalid bell isTeaching")),
+        }
+    }
+    Ok((mask, !entries.is_empty()))
+}
 /// Import the supported JSON subset. IDs are assigned by sorted source ID,
 /// independent of source array order. Coordinates in Alina are zero-based.
 /// This adapter deliberately refuses known constraints it cannot represent.
@@ -204,14 +231,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
     )?;
     reject_fields(
         &root,
-        &[
-            "relations",
-            "cards",
-            "daysDefs",
-            "groups",
-            "divisions",
-            "globals",
-        ],
+        &["relations", "cards", "groups", "divisions", "globals"],
         "school",
     )?;
     let days =
@@ -220,16 +240,6 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         .map_err(|_| err("invalid periodsPerDay"))?;
     if days == 0 || periods == 0 || u16::from(days) * u16::from(periods) > 64 {
         return Err(err("week must contain 1..=64 slots"));
-    }
-    // Bells, per-class schedules, and settings must be explicitly translated
-    // before they can safely participate in generation.
-    if root.get("bell").is_some_and(Value::is_object)
-        || root
-            .get("bells")
-            .and_then(Value::as_array)
-            .is_some_and(|x| !x.is_empty())
-    {
-        return Err(err("unsupported school bell definitions"));
     }
     reject_fields(&root, &["settings"], "school")?;
     let teachers = array(&root, "teachers")?;
@@ -246,6 +256,70 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         days,
         periods_per_day: periods,
         ..Default::default()
+    };
+    let mut day_definitions = BTreeMap::new();
+    if let Some(value) = root.get("daysDefs") {
+        let definitions = value
+            .as_array()
+            .ok_or_else(|| err("daysDefs must be an array"))?;
+        for definition in definitions {
+            let id = string(definition, "id")?;
+            let bits = definition
+                .get("bits")
+                .or_else(|| definition.get("days"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| err("day definition needs bits"))?;
+            let mut mask = 0u64;
+            for group in bits.split(',') {
+                for (day, ch) in group.trim().chars().enumerate() {
+                    match ch {
+                        '1' if day < usize::from(days) => mask |= 1u64 << day,
+                        '0' => {}
+                        '1' => return Err(err("day definition outside week")),
+                        _ => return Err(err("invalid day definition bits")),
+                    }
+                }
+            }
+            if mask == 0 {
+                return Err(err("empty day definition"));
+            }
+            if day_definitions.insert(id.to_owned(), mask).is_some() {
+                return Err(err("duplicate day definition"));
+            }
+        }
+    }
+    let mut bells = BTreeMap::new();
+    if let Some(value) = root.get("bells") {
+        let entries = value
+            .as_array()
+            .ok_or_else(|| err("bells must be an array"))?;
+        for bell in entries {
+            let id = string(bell, "id")?;
+            if bells
+                .insert(id.to_owned(), bell_mask(bell, periods)?)
+                .is_some()
+            {
+                return Err(err(format!("duplicate bell ID {id}")));
+            }
+        }
+    }
+    let default_bell = match root.get("bell") {
+        None | Some(Value::Null) => (0, false),
+        Some(Value::Object(_)) => bell_mask(&root["bell"], periods)?,
+        Some(Value::String(id)) => *bells
+            .get(id)
+            .ok_or_else(|| err(format!("unknown default bell {id}")))?,
+        _ => return Err(err("invalid default bell")),
+    };
+    let all_periods = if periods == 64 {
+        u64::MAX
+    } else {
+        (1u64 << periods) - 1
+    };
+    let default_mask = if default_bell.1 {
+        default_bell.0
+    } else {
+        all_periods
     };
     for t in teachers {
         allowed_fields(
@@ -270,8 +344,32 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             &["id", "name", "size", "bellId", "constraints", "timeOff"],
             "class",
         )?;
-        reject_fields(c, &["bellId", "constraints", "timeOff"], "class")?;
+        reject_fields(c, &["constraints", "timeOff"], "class")?;
         let id = ClassId(ci[string(c, "id")?]);
+        let class_bell = match c.get("bellId") {
+            None | Some(Value::Null) => default_bell,
+            Some(Value::String(bell)) if bell.is_empty() => default_bell,
+            Some(Value::String(bell)) => *bells
+                .get(bell)
+                .ok_or_else(|| err(format!("unknown class bell {bell}")))?,
+            _ => return Err(err("invalid class bellId")),
+        };
+        let valid = if class_bell.1 {
+            class_bell.0
+        } else {
+            default_mask
+        };
+        let mut blocked = 0;
+        for day in 0..days {
+            for period in 0..periods {
+                if valid & (1u64 << period) == 0 {
+                    blocked |= 1u64 << (u32::from(day) * u32::from(periods) + u32::from(period));
+                }
+            }
+        }
+        if blocked != 0 {
+            doc.hard_limits.class_blocked_slots.insert(id, blocked);
+        }
         doc.classes.insert(
             id,
             Class {
@@ -343,15 +441,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         )?;
         reject_fields(
             l,
-            &[
-                "constraints",
-                "fixedDay",
-                "fixedPeriod",
-                "daysDefId",
-                "groupIds",
-                "conditional",
-                "isOptional",
-            ],
+            &["constraints", "groupIds", "conditional", "isOptional"],
             "lesson",
         )?;
         let source = string(l, "id")?;
@@ -379,6 +469,17 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         let occurrences =
             u16::try_from(weekly / u64::from(duration)).map_err(|_| err("too many occurrences"))?;
         let lesson = LessonId(li[source]);
+        if let Some(value) = l.get("daysDefId") {
+            if !value.is_null() {
+                let day_id = value.as_str().ok_or_else(|| err("invalid daysDefId"))?;
+                if !day_id.is_empty() {
+                    let mask = *day_definitions
+                        .get(day_id)
+                        .ok_or_else(|| err(format!("unknown day definition {day_id}")))?;
+                    doc.hard_limits.lesson_allowed_days.insert(lesson, mask);
+                }
+            }
+        }
         let class_ids = references(l, "classIds", &ci)?
             .into_iter()
             .map(ClassId)
@@ -435,6 +536,28 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
                 lesson,
                 rooms: allowed.clone(),
             });
+        }
+        match (l.get("fixedDay"), l.get("fixedPeriod")) {
+            (None | Some(Value::Null), None | Some(Value::Null)) => {}
+            (Some(day), Some(period)) => {
+                let day = day.as_u64().ok_or_else(|| err("invalid fixedDay"))?;
+                let period = period.as_u64().ok_or_else(|| err("invalid fixedPeriod"))?;
+                if day >= u64::from(days) || period == 0 || period > u64::from(periods) {
+                    return Err(err("fixed placement outside week"));
+                }
+                let card = occurrence_ids
+                    .first()
+                    .copied()
+                    .ok_or_else(|| err("no occurrence for fixed placement"))?;
+                doc.hard_limits.card_fixed_start.insert(
+                    card,
+                    TimeSlot {
+                        day: day as u8,
+                        period: (period - 1) as u8,
+                    },
+                );
+            }
+            _ => return Err(err("fixedDay and fixedPeriod must be specified together")),
         }
         cards.insert(source.to_owned(), occurrence_ids);
     }
@@ -507,6 +630,52 @@ mod tests {
         assert_eq!(
             availability,
             b.document.teachers[&TeacherId(1)].availability
+        );
+        Ok(())
+    }
+    #[test]
+    fn bells_block_breaks_and_all_break_bells() -> Result<(), ImportError> {
+        let mut v = input();
+        v["bell"] =
+            json!({"periods":[{"index":1},{"index":2,"isTeaching":false},{"index":3},{"index":4}]});
+        let imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(
+            imported.document.hard_limits.class_blocked_slots[&ClassId(1)],
+            (1 << 1) | (1 << 5)
+        );
+        v["bells"] = json!([{"id":"breaks","periods":[{"index":1,"isTeaching":false}]}]);
+        v["classes"][0]["bellId"] = json!("breaks");
+        let imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(
+            imported.document.hard_limits.class_blocked_slots[&ClassId(1)],
+            255
+        );
+        Ok(())
+    }
+    #[test]
+    fn day_patterns_are_unioned_and_checked() -> Result<(), ImportError> {
+        let mut v = input();
+        v["daysDefs"] = json!([{"id":"d", "bits":"10,01"}]);
+        v["lessons"][0]["daysDefId"] = json!("d");
+        let imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(
+            imported.document.hard_limits.lesson_allowed_days[&LessonId(1)],
+            3
+        );
+        v["lessons"][0]["daysDefId"] = json!("missing");
+        assert!(import_chronexa_json(&v.to_string()).is_err());
+        Ok(())
+    }
+    #[test]
+    fn lesson_anchor_pins_only_first_occurrence() -> Result<(), ImportError> {
+        let mut v = input();
+        v["lessons"][0]["fixedDay"] = json!(0);
+        v["lessons"][0]["fixedPeriod"] = json!(2);
+        let imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(imported.document.hard_limits.card_fixed_start.len(), 1);
+        assert_eq!(
+            imported.document.hard_limits.card_fixed_start[&CardId(1)],
+            TimeSlot { day: 0, period: 1 }
         );
         Ok(())
     }

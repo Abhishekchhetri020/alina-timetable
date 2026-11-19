@@ -6,7 +6,7 @@ Chronexa repository inspected at `ef92770` on 2026-11-19. Alina is a separate Ru
 | --- | --- | --- |
 | School setup, teachers, subjects, classes, rooms, lessons, groups, divisions, bells, day/week/term definitions | `js/ui/entities/`, `js/ui/wizard/` | Initial data structures only; groups, bells and patterns missing |
 | aSc XML import/export and round trip | `js/xml/`, `js/ui/` export | Not implemented |
-| Chronexa school JSON import | `js/solver/csp_solver.js` | Strict experimental subset: entities, occurrence expansion, room choices and teacher time-off. Unknown fields and unsupported rules are rejected; real Chronexa files typically contain additional fields and are not yet supported. |
+| Chronexa school JSON import | `js/solver/csp_solver.js` | Strict experimental subset: entities, occurrence expansion, room choices, teacher time-off, class bells, day patterns and first-occurrence fixed starts. Unknown fields and unsupported rules are rejected; real Chronexa files typically contain additional fields and are not yet supported. |
 | Timetable editor, unplaced tray, drag, swap, undo, class/teacher/room views | `js/ui/editor/`, `js/ui/grid_view.js` | Not implemented |
 | Verification and hard/soft constraints | `js/solver/constraints.js`, `constraint_keys.js`, `csp_solver.js` | Initial subset oracle: clashes, availability, capacities, daily limits, period restrictions and explicit pairwise relations; teacher gaps and undesirable periods are reported as unweighted indicators |
 | Generation, improve, advanced relations and diagnostics | `js/solver/csp_solver.js`, `backend/solver_cpsat.py`, `js/solver/wasm/` | Reference backtracking solver and explicit card-pair relations only; scoped relations and soft optimization not implemented |

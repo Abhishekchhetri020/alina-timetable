@@ -278,6 +278,14 @@ pub fn verify(doc: &TimetableDoc) -> Report {
                 violations.push(Violation::FixedStartMismatch { card: key });
             }
         }
+        if doc
+            .hard_limits
+            .card_fixed_start
+            .get(&key)
+            .is_some_and(|fixed| *fixed != placement.start)
+        {
+            violations.push(Violation::FixedStartMismatch { card: key });
+        }
         let start_bit = 1u64 << placement.start.period;
         let end_bit = 1u64 << (end - 1);
         if doc
