@@ -3,7 +3,7 @@
 //! It does not implement the full Chronexa constraint set or optimize soft scores.
 use alina_doc::{Placement, TimetableDoc};
 use alina_foundation::{CardId, LessonId, RoomId, TimeSlot};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// A card occurrence and its permissible rooms. An empty list means no room.
@@ -124,8 +124,58 @@ struct Search<'a> {
     current: Vec<Placement>,
     limited: bool,
 }
+/// Cheap rejection index. The oracle remains authoritative; this index must
+/// only reject unavoidable clashes and is rebuilt at every search node so
+/// backtracking cannot leave stale occupancy behind.
+#[derive(Default)]
+struct Occupancy {
+    teachers: BTreeMap<alina_foundation::TeacherId, u64>,
+    rooms: BTreeMap<RoomId, u64>,
+}
+impl Occupancy {
+    fn from_doc(doc: &TimetableDoc) -> Self {
+        let mut state = Self::default();
+        for p in doc.placements.values() {
+            if let Some(lesson) = doc.lessons.get(&p.lesson) {
+                let mask = span_mask(doc, p.start, lesson.duration);
+                for teacher in &lesson.teachers {
+                    *state.teachers.entry(*teacher).or_default() |= mask;
+                }
+                if let Some(room) = p.room {
+                    *state.rooms.entry(room).or_default() |= mask;
+                }
+            }
+        }
+        state
+    }
+    fn conflicts(&self, doc: &TimetableDoc, candidate: &Placement) -> bool {
+        let Some(lesson) = doc.lessons.get(&candidate.lesson) else {
+            return true;
+        };
+        let mask = span_mask(doc, candidate.start, lesson.duration);
+        lesson
+            .teachers
+            .iter()
+            .any(|id| self.teachers.get(id).is_some_and(|m| m & mask != 0))
+            || candidate
+                .room
+                .is_some_and(|id| self.rooms.get(&id).is_some_and(|m| m & mask != 0))
+    }
+}
+fn span_mask(doc: &TimetableDoc, start: TimeSlot, duration: u8) -> u64 {
+    let mut mask = 0u64;
+    for offset in 0..duration {
+        let bit = u32::from(start.day) * u32::from(doc.periods_per_day)
+            + u32::from(start.period)
+            + u32::from(offset);
+        if bit < 64 {
+            mask |= 1u64 << bit;
+        }
+    }
+    mask
+}
 impl Search<'_> {
-    fn candidates(&self, r: &CardRequest) -> Vec<Placement> {
+    fn candidates(&self, r: &CardRequest, occupancy: &Occupancy) -> Vec<Placement> {
         let rooms: Vec<Option<RoomId>> = if r.rooms.is_empty() {
             vec![None]
         } else {
@@ -159,6 +209,9 @@ impl Search<'_> {
                         start: TimeSlot { day: d, period: p },
                         room: *room,
                     };
+                    if occupancy.conflicts(&self.doc, &candidate) {
+                        continue;
+                    }
                     if alina_oracle::preview(&self.doc, candidate.clone())
                         .violations
                         .is_empty()
@@ -184,9 +237,10 @@ impl Search<'_> {
         }
         let mut choice = None;
         let mut options = Vec::new();
+        let occupancy = Occupancy::from_doc(&self.doc);
         for id in remaining {
             if let Some(r) = self.requests.iter().find(|r| r.card == *id) {
-                let c = self.candidates(r);
+                let c = self.candidates(r, &occupancy);
                 if choice.is_none() || c.len() < options.len() {
                     choice = Some(*id);
                     options = c;
@@ -325,6 +379,39 @@ mod tests {
         assert!(matches!(
             solve(&doc, &requests, 100),
             Err(SolveError::UnknownRelationCard(CardId(2)))
+        ));
+    }
+    #[test]
+    fn occupancy_filter_matches_oracle_clashes_on_double_periods() {
+        let mut doc = fixture();
+        if let Some(lesson) = doc.lessons.get_mut(&LessonId(1)) {
+            lesson.duration = 2;
+        }
+        let fixed = Placement {
+            card: CardId(1),
+            lesson: LessonId(1),
+            start: TimeSlot { day: 0, period: 0 },
+            room: None,
+        };
+        Arc::make_mut(&mut doc.placements).insert(fixed.card, fixed);
+        let state = Occupancy::from_doc(&doc);
+        let candidate = Placement {
+            card: CardId(2),
+            lesson: LessonId(1),
+            start: TimeSlot { day: 0, period: 0 },
+            room: None,
+        };
+        assert!(state.conflicts(&doc, &candidate));
+        assert!(!alina_oracle::preview(&doc, candidate).violations.is_empty());
+        Arc::make_mut(&mut doc.placements).clear();
+        assert!(!Occupancy::from_doc(&doc).conflicts(
+            &doc,
+            &Placement {
+                card: CardId(2),
+                lesson: LessonId(1),
+                start: TimeSlot { day: 0, period: 0 },
+                room: None
+            }
         ));
     }
 }
