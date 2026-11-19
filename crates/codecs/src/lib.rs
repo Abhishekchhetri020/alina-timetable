@@ -433,6 +433,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             },
         );
     }
+    let mut class_teaching_masks = BTreeMap::new();
     for c in classes {
         allowed_fields(
             c,
@@ -454,6 +455,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         } else {
             default_mask
         };
+        class_teaching_masks.insert(id, valid);
         let mut blocked = 0;
         for day in 0..days {
             for period in 0..periods {
@@ -849,7 +851,6 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             &[
                 "teacherids",
                 "classroomids",
-                "positions",
                 "positions2",
                 "param1",
                 "param2",
@@ -860,6 +861,64 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             "relation",
         )?;
         let typ = string(relation, "typ")?;
+        if typ != "n_16" {
+            reject_fields(relation, &["positions"], "relation")?;
+        }
+        if typ == "n_16" {
+            let position = match relation.get("positions") {
+                None | Some(Value::Null) => "both",
+                Some(Value::String(value)) if value.is_empty() => "both",
+                Some(Value::String(value)) if value == "first" || value == "last" => value.as_str(),
+                _ => return Err(err("invalid first/last relation positions")),
+            };
+            let mut subjects = references(relation, "subjectids", &si)?;
+            subjects.extend(references(relation, "subject2ids", &si)?);
+            let subjects: BTreeSet<_> = subjects.into_iter().map(SubjectId).collect();
+            let classes: BTreeSet<_> = references(relation, "classids", &ci)?
+                .into_iter()
+                .map(ClassId)
+                .collect();
+            for (&id, lesson) in &doc.lessons {
+                if (!subjects.is_empty() && !subjects.contains(&lesson.subject))
+                    || (!classes.is_empty() && !lesson.classes.iter().any(|c| classes.contains(c)))
+                {
+                    continue;
+                }
+                let masks: Vec<u64> = if lesson.classes.is_empty() {
+                    vec![default_mask]
+                } else {
+                    lesson
+                        .classes
+                        .iter()
+                        .map(|c| class_teaching_masks[c])
+                        .collect()
+                };
+                let mut allowed = all_periods;
+                for mask in masks {
+                    let mut edge = 0u64;
+                    if mask != 0 {
+                        let first = mask.trailing_zeros();
+                        let last = 63 - mask.leading_zeros();
+                        if position != "last" {
+                            edge |= 1u64 << first;
+                        }
+                        if position != "first" && last + 1 >= u32::from(lesson.duration) {
+                            edge |= 1u64 << (last + 1 - u32::from(lesson.duration));
+                        }
+                        for offset in 0..u32::from(lesson.duration) {
+                            edge &= mask >> offset;
+                        }
+                    }
+                    allowed &= edge;
+                }
+                doc.hard_limits
+                    .lesson_allowed_starts
+                    .entry(id)
+                    .and_modify(|m| *m &= allowed)
+                    .or_insert(allowed);
+            }
+            continue;
+        }
         let (kind, cross_subject) = match typ {
             "n_1" => (CardRelationKind::DifferentDays, true),
             "n_0" => (CardRelationKind::NotAdjacent, true),
@@ -967,6 +1026,28 @@ mod tests {
           "classrooms": [{"id":"r", "name":"R", "capacity":25}],
           "subjects": [{"id":"s", "name":"S"}],
           "lessons": [{"id":"l", "subjectId":"s", "teacherIds":["t"], "classIds":["c"], "periodsPerWeek":4, "periodsPerCard":2, "preferredRoomId":"r"}]})
+    }
+    #[test]
+    fn first_last_relation_respects_bells_and_lesson_duration() -> Result<(), ImportError> {
+        let mut v = input();
+        v["bell"] =
+            json!({"periods":[{"index":1},{"index":2},{"index":3,"isTeaching":false},{"index":4}]});
+        v["relations"] = json!([{ "typ":"n_16", "subjectids":["s"], "positions":"last" }]);
+        let imported = import_chronexa_json(&v.to_string())?;
+        // The last two-period block would include the break; it is infeasible.
+        assert_eq!(
+            imported.document.hard_limits.lesson_allowed_starts[&LessonId(1)],
+            0
+        );
+        v["relations"][0]["positions"] = json!("first");
+        let imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(
+            imported.document.hard_limits.lesson_allowed_starts[&LessonId(1)],
+            1
+        );
+        v["relations"][0]["positions"] = json!("other");
+        assert!(import_chronexa_json(&v.to_string()).is_err());
+        Ok(())
     }
     #[test]
     fn rejects_order_dependent_multi_period_cannot_follow_relation() -> Result<(), ImportError> {
