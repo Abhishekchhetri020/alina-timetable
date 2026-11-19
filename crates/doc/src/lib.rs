@@ -70,6 +70,8 @@ pub enum CardRelationKind {
     NotAdjacent,
     SameDay,
     SameStart,
+    /// On the same day, both starts must use the same period.
+    SamePeriodWhenSameDay,
     /// Either card immediately follows the other, accounting for duration.
     Adjacent,
     /// Card a immediately precedes card b.

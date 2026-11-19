@@ -865,7 +865,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             "n_0" => (CardRelationKind::NotAdjacent, true),
             "n_2" => (CardRelationKind::NoOverlap, false),
             "n_8" | "n_10" => (CardRelationKind::SameDay, true),
-            "n_12" | "n_13" => (CardRelationKind::SameStart, false),
+            "n_12" | "n_13" => (CardRelationKind::SamePeriodWhenSameDay, false),
             _ => return Err(err(format!("unsupported relation type {typ}"))),
         };
         let mut subjects = references(relation, "subjectids", &si)?;
@@ -916,6 +916,46 @@ mod tests {
           "classrooms": [{"id":"r", "name":"R", "capacity":25}],
           "subjects": [{"id":"s", "name":"S"}],
           "lessons": [{"id":"l", "subjectId":"s", "teacherIds":["t"], "classIds":["c"], "periodsPerWeek":4, "periodsPerCard":2, "preferredRoomId":"r"}]})
+    }
+    #[test]
+    fn simultaneous_relation_only_compares_periods_on_same_day() -> Result<(), ImportError> {
+        use alina_doc::Placement;
+        use alina_oracle::{verify, Violation};
+        use std::sync::Arc;
+        let mut v = input();
+        v["lessons"] = json!([
+            {"id":"a", "subjectId":"s", "periodsPerWeek":1},
+            {"id":"b", "subjectId":"s", "periodsPerWeek":1}
+        ]);
+        v["relations"] = json!([{ "typ":"n_12", "subjectids":["s"] }]);
+        let mut doc = import_chronexa_json(&v.to_string())?.document;
+        for (id, day, period) in [(1, 0, 0), (2, 1, 1)] {
+            Arc::make_mut(&mut doc.placements).insert(
+                CardId(id),
+                Placement {
+                    card: CardId(id),
+                    lesson: LessonId(id),
+                    start: TimeSlot { day, period },
+                    room: None,
+                },
+            );
+        }
+        let has_relation_violation = |doc: &TimetableDoc| {
+            verify(doc)
+                .violations
+                .iter()
+                .any(|x| matches!(x, Violation::CardRelation { .. }))
+        };
+        assert!(!has_relation_violation(&doc));
+        if let Some(p) = Arc::make_mut(&mut doc.placements).get_mut(&CardId(2)) {
+            p.start.day = 0;
+        }
+        assert!(has_relation_violation(&doc));
+        if let Some(p) = Arc::make_mut(&mut doc.placements).get_mut(&CardId(2)) {
+            p.start.period = 0;
+        }
+        assert!(!has_relation_violation(&doc));
+        Ok(())
     }
     #[test]
     fn scoped_relations_expand_to_matching_occurrences() -> Result<(), ImportError> {

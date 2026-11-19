@@ -634,6 +634,7 @@ pub fn verify(doc: &TimetableDoc) -> Report {
             }
             CardRelationKind::SameDay => !same_day,
             CardRelationKind::SameStart => a.start != b.start,
+            CardRelationKind::SamePeriodWhenSameDay => same_day && a.start.period != b.start.period,
             CardRelationKind::Adjacent => {
                 !same_day
                     || (a_end != u16::from(b.start.period) && b_end != u16::from(a.start.period))
