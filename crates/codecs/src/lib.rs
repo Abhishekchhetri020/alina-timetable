@@ -866,11 +866,32 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             "n_2" => (CardRelationKind::NoOverlap, false),
             "n_8" | "n_10" => (CardRelationKind::SameDay, true),
             "n_12" | "n_13" => (CardRelationKind::SamePeriodWhenSameDay, false),
+            "n_9" => (CardRelationKind::SameDayOrdered, false),
             _ => return Err(err(format!("unsupported relation type {typ}"))),
         };
-        let mut subjects = references(relation, "subjectids", &si)?;
-        subjects.extend(references(relation, "subject2ids", &si)?);
-        let subjects: BTreeSet<_> = subjects.into_iter().map(SubjectId).collect();
+        let primary = references(relation, "subjectids", &si)?;
+        let secondary = references(relation, "subject2ids", &si)?;
+        let leaders: BTreeSet<_> = if secondary.is_empty() {
+            primary.iter().take(1).copied().map(SubjectId).collect()
+        } else {
+            primary.iter().copied().map(SubjectId).collect()
+        };
+        let followers: BTreeSet<_> = if secondary.is_empty() {
+            primary
+                .iter()
+                .skip(1)
+                .take(1)
+                .copied()
+                .map(SubjectId)
+                .collect()
+        } else {
+            secondary.iter().copied().map(SubjectId).collect()
+        };
+        let subjects: BTreeSet<_> = primary
+            .into_iter()
+            .chain(secondary)
+            .map(SubjectId)
+            .collect();
         let classes: BTreeSet<_> = references(relation, "classids", &ci)?
             .into_iter()
             .map(ClassId)
@@ -884,6 +905,23 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
                 continue;
             }
             matching.push((request.card, l.subject));
+        }
+        if typ == "n_9" {
+            for &(a, subject_a) in &matching {
+                if !leaders.contains(&subject_a) {
+                    continue;
+                }
+                for &(b, subject_b) in &matching {
+                    if a != b && followers.contains(&subject_b) {
+                        doc.hard_limits.card_relations.push(CardRelation {
+                            a,
+                            b,
+                            kind: kind.clone(),
+                        });
+                    }
+                }
+            }
+            continue;
         }
         for a in 0..matching.len() {
             for b in a + 1..matching.len() {
@@ -916,6 +954,49 @@ mod tests {
           "classrooms": [{"id":"r", "name":"R", "capacity":25}],
           "subjects": [{"id":"s", "name":"S"}],
           "lessons": [{"id":"l", "subjectId":"s", "teacherIds":["t"], "classIds":["c"], "periodsPerWeek":4, "periodsPerCard":2, "preferredRoomId":"r"}]})
+    }
+    #[test]
+    fn ordered_subject_relation_respects_direction_span_and_legacy_format(
+    ) -> Result<(), ImportError> {
+        use alina_doc::Placement;
+        use alina_oracle::{verify, Violation};
+        use std::sync::Arc;
+        let mut v = input();
+        v["subjects"] = json!([{"id":"a", "name":"A"}, {"id":"b", "name":"B"}]);
+        // Card IDs sort opposite to the subject order, so direction must be explicit.
+        v["lessons"] = json!([
+            {"id":"first", "subjectId":"b", "periodsPerWeek":1},
+            {"id":"second", "subjectId":"a", "periodsPerWeek":2, "periodsPerCard":2}
+        ]);
+        v["relations"] = json!([{ "typ":"n_9", "subjectids":["a"], "subject2ids":["b"] }]);
+        let verify_relation =
+            |v: &Value, follower_day: u8, follower_period: u8| -> Result<bool, ImportError> {
+                let mut d = import_chronexa_json(&v.to_string())?.document;
+                for (card, lesson, day, period) in
+                    [(1, 1, follower_day, follower_period), (2, 2, 0, 0)]
+                {
+                    Arc::make_mut(&mut d.placements).insert(
+                        CardId(card),
+                        Placement {
+                            card: CardId(card),
+                            lesson: LessonId(lesson),
+                            start: TimeSlot { day, period },
+                            room: None,
+                        },
+                    );
+                }
+                Ok(verify(&d)
+                    .violations
+                    .iter()
+                    .any(|x| matches!(x, Violation::CardRelation { .. })))
+            };
+        assert!(!verify_relation(&v, 0, 2)?);
+        assert!(verify_relation(&v, 0, 1)?);
+        assert!(verify_relation(&v, 1, 2)?);
+        v["relations"] = json!([{ "typ":"n_9", "subjectids":["a", "b"] }]);
+        assert!(!verify_relation(&v, 0, 2)?);
+        assert!(verify_relation(&v, 0, 1)?);
+        Ok(())
     }
     #[test]
     fn simultaneous_relation_only_compares_periods_on_same_day() -> Result<(), ImportError> {
