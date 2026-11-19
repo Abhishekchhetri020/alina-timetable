@@ -399,7 +399,14 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         }
     }
     let default_bell = match root.get("bell") {
-        None | Some(Value::Null) => (0, false),
+        None | Some(Value::Null) => match root
+            .get("bells")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+        {
+            Some(bell) => bell_mask(bell, periods)?,
+            None => (0, false),
+        },
         Some(Value::Object(_)) => bell_mask(&root["bell"], periods)?,
         Some(Value::String(id)) => *bells
             .get(id)
@@ -1026,6 +1033,22 @@ mod tests {
           "classrooms": [{"id":"r", "name":"R", "capacity":25}],
           "subjects": [{"id":"s", "name":"S"}],
           "lessons": [{"id":"l", "subjectId":"s", "teacherIds":["t"], "classIds":["c"], "periodsPerWeek":4, "periodsPerCard":2, "preferredRoomId":"r"}]})
+    }
+    #[test]
+    fn first_bell_is_default_when_school_bell_is_missing() -> Result<(), ImportError> {
+        let mut v = input();
+        v["bells"] = json!([{ "id":"default", "periods":[{"index":2},{"index":3}] }]);
+        v["relations"] = json!([{ "typ":"n_16", "subjectids":["s"], "positions":"first" }]);
+        let imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(
+            imported.document.hard_limits.lesson_allowed_starts[&LessonId(1)],
+            1 << 1
+        );
+        assert_eq!(
+            imported.document.hard_limits.class_blocked_slots[&ClassId(1)],
+            0b10011001
+        );
+        Ok(())
     }
     #[test]
     fn first_last_relation_respects_bells_and_lesson_duration() -> Result<(), ImportError> {
