@@ -226,6 +226,7 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
             "bell",
             "bells",
             "settings",
+            "subjectDailyLimit",
         ],
         "school",
     )?;
@@ -257,6 +258,43 @@ pub fn import_chronexa_json(input: &str) -> Result<ChronexaImport, ImportError> 
         periods_per_day: periods,
         ..Default::default()
     };
+    if let Some(value) = root.get("subjectDailyLimit") {
+        let classes = value
+            .as_object()
+            .ok_or_else(|| err("subjectDailyLimit must be an object"))?;
+        for (class, values) in classes {
+            let class = ClassId(
+                *ci.get(class)
+                    .ok_or_else(|| err(format!("unknown daily limit class {class}")))?,
+            );
+            let values = values
+                .as_object()
+                .ok_or_else(|| err("subjectDailyLimit class entry must be an object"))?;
+            for (subject, value) in values {
+                let subject = SubjectId(
+                    *si.get(subject)
+                        .ok_or_else(|| err(format!("unknown daily limit subject {subject}")))?,
+                );
+                let limit = match value {
+                    Value::String(s) if s == "i" || s == "*" => None,
+                    Value::Number(n) if n.as_i64() == Some(-1) => None,
+                    Value::Number(n) => Some(
+                        u8::try_from(
+                            n.as_u64()
+                                .ok_or_else(|| err("invalid subject daily limit"))?,
+                        )
+                        .map_err(|_| err("subject daily limit too large"))?,
+                    ),
+                    _ => return Err(err("invalid subject daily limit")),
+                };
+                doc.hard_limits
+                    .class_subject_periods_per_day
+                    .entry(class)
+                    .or_default()
+                    .insert(subject, limit);
+            }
+        }
+    }
     let mut day_definitions = BTreeMap::new();
     if let Some(value) = root.get("daysDefs") {
         let definitions = value
@@ -682,6 +720,23 @@ mod tests {
         );
         v["lessons"][0]["daysDefId"] = json!("missing");
         assert!(import_chronexa_json(&v.to_string()).is_err());
+        Ok(())
+    }
+    #[test]
+    fn class_subject_daily_limits_include_unlimited_sentinel() -> Result<(), ImportError> {
+        let mut v = input();
+        v["subjectDailyLimit"] = json!({"c":{"s":1}});
+        let imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(
+            imported.document.hard_limits.class_subject_periods_per_day[&ClassId(1)][&SubjectId(1)],
+            Some(1)
+        );
+        v["subjectDailyLimit"]["c"]["s"] = json!("*");
+        let imported = import_chronexa_json(&v.to_string())?;
+        assert_eq!(
+            imported.document.hard_limits.class_subject_periods_per_day[&ClassId(1)][&SubjectId(1)],
+            None
+        );
         Ok(())
     }
     #[test]

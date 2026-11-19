@@ -89,6 +89,10 @@ pub struct HardLimits {
     pub teacher_periods_per_day: BTreeMap<TeacherId, u8>,
     pub class_periods_per_day: BTreeMap<ClassId, u8>,
     pub subject_periods_per_day: BTreeMap<SubjectId, u8>,
+    /// Per-class overrides of subject daily period limits. None explicitly
+    /// removes a subject-wide limit for that class.
+    #[serde(default)]
+    pub class_subject_periods_per_day: BTreeMap<ClassId, BTreeMap<SubjectId, Option<u8>>>,
     /// Maximum simultaneous cards per subject. A missing entry is unrestricted.
     #[serde(default)]
     pub subject_max_parallel: BTreeMap<SubjectId, u16>,

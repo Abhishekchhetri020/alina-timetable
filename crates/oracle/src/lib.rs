@@ -540,7 +540,20 @@ pub fn verify(doc: &TimetableDoc) -> Report {
         }
     }
     for ((class, subject, day), periods) in subject_slots {
-        if let Some(&limit) = doc.hard_limits.subject_periods_per_day.get(&subject) {
+        let limit = match doc
+            .hard_limits
+            .class_subject_periods_per_day
+            .get(&class)
+            .and_then(|m| m.get(&subject))
+        {
+            Some(value) => *value,
+            None => doc
+                .hard_limits
+                .subject_periods_per_day
+                .get(&subject)
+                .copied(),
+        };
+        if let Some(limit) = limit {
             if periods.len() > usize::from(limit) {
                 violations.push(Violation::SubjectDailyLimit {
                     class,
@@ -717,6 +730,72 @@ mod tests {
         );
         let r = verify(&d);
         assert_eq!((r.required, r.placed, r.unplaced), (3, 1, 2));
+    }
+    #[test]
+    fn class_subject_override_takes_precedence_over_subject_limit() {
+        let mut d = TimetableDoc::default();
+        d.classes.insert(
+            ClassId(1),
+            Class {
+                id: ClassId(1),
+                name: "C".into(),
+                size: 10,
+            },
+        );
+        d.subjects.insert(
+            SubjectId(1),
+            Subject {
+                id: SubjectId(1),
+                name: "S".into(),
+            },
+        );
+        d.lessons.insert(
+            LessonId(1),
+            Lesson {
+                id: LessonId(1),
+                subject: SubjectId(1),
+                teachers: vec![],
+                classes: vec![ClassId(1)],
+                class_scopes: BTreeMap::new(),
+                student_count: None,
+                duration: 2,
+                occurrences: 1,
+            },
+        );
+        Arc::make_mut(&mut d.placements).insert(
+            CardId(1),
+            Placement {
+                card: CardId(1),
+                lesson: LessonId(1),
+                start: TimeSlot { day: 0, period: 0 },
+                room: None,
+            },
+        );
+        d.hard_limits
+            .subject_periods_per_day
+            .insert(SubjectId(1), 1);
+        assert!(verify(&d)
+            .violations
+            .iter()
+            .any(|v| matches!(v, Violation::SubjectDailyLimit { .. })));
+        d.hard_limits
+            .class_subject_periods_per_day
+            .entry(ClassId(1))
+            .or_default()
+            .insert(SubjectId(1), None);
+        assert!(!verify(&d)
+            .violations
+            .iter()
+            .any(|v| matches!(v, Violation::SubjectDailyLimit { .. })));
+        d.hard_limits
+            .class_subject_periods_per_day
+            .entry(ClassId(1))
+            .or_default()
+            .insert(SubjectId(1), Some(1));
+        assert!(verify(&d)
+            .violations
+            .iter()
+            .any(|v| matches!(v, Violation::SubjectDailyLimit { .. })));
     }
     #[test]
     fn detects_clashes_in_second_period_and_capacity() {
