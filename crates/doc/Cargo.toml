@@ -1,0 +1,9 @@
+[package]
+name = "alina-doc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+alina-foundation.workspace = true
+serde.workspace = true

@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/foundation", "crates/doc", "crates/codecs", "crates/oracle", "crates/solver", "crates/engine", "crates/automation", "crates/ui-egui", "apps/alina-desktop", "apps/alina-cli", "apps/alina-web"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "=1.0.228", features = ["derive", "rc"] }
+serde_json = "=1.0.150"
+alina-foundation = { path = "crates/foundation" }
+alina-doc = { path = "crates/doc" }
