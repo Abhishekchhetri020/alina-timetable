@@ -45,6 +45,10 @@ dependencies = [
 [[package]]
 name = "alina-oracle"
 version = "0.1.0"
+dependencies = [
+ "alina-doc",
+ "alina-foundation",
+]
 
 [[package]]
 name = "alina-solver"
