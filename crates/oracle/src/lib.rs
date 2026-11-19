@@ -8,6 +8,10 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Violation {
     InvalidWeek,
+    InvalidLesson {
+        lesson: alina_foundation::LessonId,
+        reason: &'static str,
+    },
     CardRelation {
         index: usize,
         a: CardId,
@@ -284,6 +288,88 @@ pub fn verify(doc: &TimetableDoc) -> Report {
         && u16::from(doc.days) * u16::from(doc.periods_per_day) <= 64;
     if !week_ok {
         violations.push(Violation::InvalidWeek);
+    }
+    // Validate requirements even when they have not yet been placed. Without
+    // this, an impossible or dangling lesson could look like a clean base.
+    for (&id, lesson) in &doc.lessons {
+        if id != lesson.id {
+            violations.push(Violation::InvalidLesson {
+                lesson: id,
+                reason: "lesson ID does not match map key",
+            });
+        }
+        if lesson.duration == 0 || (week_ok && lesson.duration > doc.periods_per_day) {
+            violations.push(Violation::InvalidLesson {
+                lesson: id,
+                reason: "invalid duration",
+            });
+        }
+        if lesson.occurrences == 0 {
+            violations.push(Violation::InvalidLesson {
+                lesson: id,
+                reason: "zero occurrences",
+            });
+        }
+        if !doc.subjects.contains_key(&lesson.subject) {
+            violations.push(Violation::InvalidLesson {
+                lesson: id,
+                reason: "unknown subject",
+            });
+        }
+        if lesson
+            .teachers
+            .iter()
+            .any(|teacher| !doc.teachers.contains_key(teacher))
+        {
+            violations.push(Violation::InvalidLesson {
+                lesson: id,
+                reason: "unknown teacher",
+            });
+        }
+        if lesson
+            .classes
+            .iter()
+            .any(|class| !doc.classes.contains_key(class))
+        {
+            violations.push(Violation::InvalidLesson {
+                lesson: id,
+                reason: "unknown class",
+            });
+        }
+        if lesson
+            .teachers
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != lesson.teachers.len()
+        {
+            violations.push(Violation::InvalidLesson {
+                lesson: id,
+                reason: "duplicate teacher",
+            });
+        }
+        if lesson
+            .classes
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != lesson.classes.len()
+        {
+            violations.push(Violation::InvalidLesson {
+                lesson: id,
+                reason: "duplicate class",
+            });
+        }
+        if lesson
+            .class_scopes
+            .keys()
+            .any(|class| !lesson.classes.contains(class))
+        {
+            violations.push(Violation::InvalidLesson {
+                lesson: id,
+                reason: "scope references class outside lesson",
+            });
+        }
     }
     for (&teacher, data) in &doc.teachers {
         if data.availability.blocked & data.availability.undesirable != 0 {
@@ -775,6 +861,30 @@ mod tests {
         );
         let r = verify(&d);
         assert_eq!((r.required, r.placed, r.unplaced), (3, 1, 2));
+    }
+    #[test]
+    fn validates_unplaced_lesson_definitions() {
+        let mut doc = TimetableDoc::default();
+        doc.lessons.insert(
+            LessonId(1),
+            Lesson {
+                id: LessonId(1),
+                subject: SubjectId(99),
+                teachers: vec![TeacherId(9)],
+                classes: vec![],
+                class_scopes: BTreeMap::new(),
+                student_count: None,
+                duration: 0,
+                occurrences: 1,
+            },
+        );
+        let violations = verify(&doc).violations;
+        for reason in ["unknown subject", "unknown teacher", "invalid duration"] {
+            assert!(violations.contains(&Violation::InvalidLesson {
+                lesson: LessonId(1),
+                reason
+            }));
+        }
     }
     #[test]
     fn forecast_only_reports_changes_and_does_not_mutate() {
